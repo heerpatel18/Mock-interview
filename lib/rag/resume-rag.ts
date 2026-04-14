@@ -1,195 +1,218 @@
-/**
- * Resume Text Processing
- * 
- * Simplified pipeline: Extract → Normalize → Parse Projects → Filter → Prompt
- * No chunking, embeddings, or complex RAG logic - just text processing utilities.
- */
+/** Resume Text Processing : pipeline: Extract → Normalize → Parse Projects → Filter → Prompt
 
-/**
- * Normalize resume text by fixing line breaks and whitespace
+
+/*
+ * Normalize resume text by : 
+   Converts Windows-style line endings (\r\n) to Unix-style (\n)
+   Removes extra spaces at start/end
+   If there are 3+ line breaks, reduce to 2
  */
 export function normalizeResumeText(raw: string): string {
-  return raw.replace(/\r\n/g, "\n").trim().replace(/\n{3,}/g, "\n\n");
+  return raw
+    .replace(/\r\n/g, "\n")
+    .replace(/\t/g, " ")
+    .trim()
+    .replace(/\n{3,}/g, "\n\n");
 }
 
-/**
- * Escape special regex characters in a string
+
+
+
+/*
+ Adds \ before special regex chars . node.js->node\.js . 
+ (dot = any character) -> (literal dot) 
  */
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()\[\]|\\]/g, "\\$&");
 }
 
-/**
+
+
+
+/*
  * Extract projects with their technologies from resume text
- * Returns array of projects with name, tech stack, and full description
- * 
  * @param text - Normalized resume text
- * @returns Array of projects (max 5) with name, tech stack, and full description
+ * text: string → full resume text . returns → array of objects like: name tech full description
  */
-export function extractProjectsWithTech(text: string): { name: string; tech: string[]; fullText: string }[] {
-  const lines = text.split("\n");
-  const projects: { name: string; tech: string[]; fullText: string }[] = [];
-  const seenNames = new Set<string>();
+
+export function extractProjectsWithTech(
+  text: string,
+  maxProjects: number = 5
+): { name: string; tech: string[]; fullText: string }[] {
   
+  const lines = text.split("\n"); // Takes whole resume text -> splits into individual lines
+  const projects: { name: string; tech: string[]; fullText: string }[] = []; // empty list to store proj . proj name tech used text of proj
+  const seenNames = new Set<string>(); // same project isn't added twice
+
   // Find the PROJECTS section
-  let projectSectionStart = -1;
+  let projectSectionStart = -1; // to remember which line the Projects section starts at
   for (let i = 0; i < lines.length; i++) {
-    if (/^(projects|project work|side projects)/i.test(lines[i].trim())) {
-      projectSectionStart = i + 1;
-      break;
+    if (/^(projects|project work|side projects)/i.test(lines[i].trim())) { // checks for word
+      projectSectionStart = i + 1; // next line's number as the start of projects
+      break; // break when found
     }
   }
-  
-  if (projectSectionStart === -1) return [];
-  
+
+  if (projectSectionStart === -1) return []; // no PROJECTS section found → return empty
+
   // Parse projects in the section
   let i = projectSectionStart;
-  while (i < lines.length && projects.length < 5) {
-    const line = lines[i].trim();
-    
-    // Stop if we hit another major section
-    if (/^(experience|education|skills|certifications|summary|contact|profile)/i.test(line)) {
+  // Keeps looping until end of text OR until maxProjects are found (max limit)
+  while (i < lines.length && projects.length < maxProjects) {
+    const line = lines[i].trim(); // Gets the current line and removes extra spaces from it
+
+    if (!line) { i++; continue; } // skip empty lines
+
+    // Stop if we hit another major section like exp, edu etc
+    if (/^(experience|education|skills|certifications|summary|contact|profile|achievements|awards)/i.test(line)) {
       break;
     }
+
+    // Bullet lines (•, -, *) are NEVER project titles — skip them
+    const isBullet = /^[•\-\*]/.test(line) || /^\s*[•\-\*]/.test(lines[i]); // checks for bullet points
+    if (isBullet) { i++; continue; }
+
+    // Project title MUST contain "|" e.g. "Studynotion | MERN Stack" → if no "|" skip this line
+    if (!line.includes("|")) { i++; continue; }
+
+    // Splits the line by | . Takes the first part as the project name
+    const parts = line.split("|");
+    const rawName = parts[0].trim(); // left of "|" = project name
+    const afterPipe = parts[1]?.trim() ?? ""; // right of "|" = tech list or description
+
+    // Skip if project name part is empty or starts with bullet (likely not a real project title)
+    if (!rawName || /^[•\-\*]/.test(rawName)) { i++; continue; }
+
+    // Clean project name — remove trailing dashes e.g. "Agri360-" → "Agri360"
+    const projectName = rawName.replace(/[-–—]+$/, "").trim();
+
+    // Skip proj if name too short (less than 2 chars) or already seen
+    if (projectName.length < 2 || seenNames.has(projectName.toLowerCase())) {
+      i++;
+      continue;
+    }
+
+    // Collect full description (next few lines until empty line or next project)
+    const descriptionLines: string[] = []; // empty list to store description lines
+    // starts from the line just below the project title
+    let j = i + 1;
+    // until end of text OR max 12 description lines collected
+    while (j < lines.length && descriptionLines.length < 12) {
+      const nextLine = lines[j].trim();
+
+      if (!nextLine) break; // stop at empty line
+
+      // Stop if we hit another major section like exp, edu etc
+      if (/^(experience|education|skills|certifications|summary|contact|profile|achievements|awards)/i.test(nextLine)) break;
+
+      // Stop if next line is a new project title (has "|" and is NOT a bullet)
+      const nextIsBullet = /^[•\-\*]/.test(nextLine) || /^\s*[•\-\*]/.test(lines[j]); // checks for bullet points
+      if (!nextIsBullet && nextLine.includes("|")) break; // next project title found → stop collecting
+
+      descriptionLines.push(nextLine); // collect this line as part of current project description
+      j++;
+    }
+
+    // Extract technologies (after "|" if it has commas → real tech list)
+    let techs: string[] = [];
+    if (afterPipe.length > 0) {
+      // Strip dates merged into tech string by pdf-parse e.g. "Machine Learning, CNN Aug 2024– Nov 2024"
+      const cleanedAfterPipe = afterPipe
+        .replace(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\s*[-–]\s*(Ongoing|\d{4})\b/gi, "")
+        .replace(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\b/gi, "")
+        .replace(/\bOngoing\b/gi, "")
+        .trim()
+        .replace(/,\s*$/, ""); // remove trailing comma left after date is stripped
     
-    // Detect project title patterns (contains "|" or starts with capital letters)
-    if (line.includes("|") || /^[A-Z][a-zA-Z\s]+[\s|—–]/.test(line)) {
-      const parts = line.split("|");
-      const projectNamePart = parts[0].trim();
-      
-      // Skip empty or bullet lines
-      if (!projectNamePart || projectNamePart.startsWith("-") || projectNamePart.startsWith("•")) {
-        i++;
-        continue;
-      }
-      
-      // Extract project name (remove leading bullets/dashes and dates)
-      const nameMatch = projectNamePart.match(/^[\s•*-]*(.+?)(?:\s*\(\d+[-–]\d+\))?$/);
-      const projectName = nameMatch ? nameMatch[1].trim() : projectNamePart;
-      
-      // Skip if too short or already seen
-      if (projectName.length < 2 || seenNames.has(projectName.toLowerCase())) {
-        i++;
-        continue;
-      }
-      
-      // Extract technologies (after "|")
-      let techs: string[] = [];
-      if (parts.length > 1) {
-        const techPart = parts[1];
-        techs = techPart
+      if (cleanedAfterPipe.length > 0) {
+        techs = cleanedAfterPipe
           .split(",")
           .map(t => t.trim())
           .filter(t => t.length > 0)
-          .slice(0, 10); // Max 10 techs per project
+          .slice(0, 10);
       }
-      
-      // Collect full description (next few lines until empty line or next project)
-      const descriptionLines: string[] = [];
-      let j = i + 1;
-      while (j < lines.length && descriptionLines.length < 10) {
-        const nextLine = lines[j].trim();
-        
-        // Stop if empty line or new section/project
-        if (!nextLine) break;
-        if (/^(experience|education|skills|certifications|[A-Z][a-zA-Z\s]*[\s|—–])|^[^\s•*-]|^\d{4}/.test(nextLine)) break;
-        
-        // Include bullet points and description
-        if (nextLine.startsWith("-") || nextLine.startsWith("•") || nextLine.startsWith("*")) {
-          descriptionLines.push(nextLine);
-        } else if (descriptionLines.length > 0) {
-          // Include continuation lines after first bullet
-          descriptionLines.push(nextLine);
-        }
-        
-        j++;
-      }
-      
-      const fullText = [line, ...descriptionLines].join("\n").trim();
-      
-      projects.push({
-        name: projectName,
-        tech: techs,
-        fullText,
-      });
-      
-      seenNames.add(projectName.toLowerCase());
-      i = j;
-      continue;
     }
-    
-    i++;
+
+    // Always scan bullet points for tech stack line and merge with | extracted techs
+    const techBullet = descriptionLines.find(l =>
+      l.toLowerCase().includes("tech stack:") || // e.g. "• Tech Stack: Python, FAISS..."
+      l.toLowerCase().includes("technologies:") ||
+      l.toLowerCase().includes("built with:")
+    );
+
+    if (techBullet) {
+      const techStr = techBullet.split(":").slice(1).join(":").trim(); // get everything after first ":" handles colons inside tech names e.g. "GPT-4.1"
+      const bulletTechs = techStr
+        .split(",") // split into individual techs
+        .map(t => t.trim()) // remove spaces
+        .filter(t => t.length > 0) // remove empty items
+        .slice(0, 10);
+
+      // Merge without duplicates while preserving existing order
+      const existing = new Set(techs.map(t => t.toLowerCase())); // track already-added techs
+      bulletTechs.forEach((t) => {
+        if (!existing.has(t.toLowerCase())) { // only add if not already in list
+          techs.push(t);
+          existing.add(t.toLowerCase());
+        }
+      });
+    }
+
+    const fullText = [line, ...descriptionLines].join("\n").trim(); // combine title + description into one block of text
+
+    projects.push({
+      name: projectName,
+      tech: techs,
+      fullText,
+    });
+
+    seenNames.add(projectName.toLowerCase()); // Adds the project name to seenNames so it's not added again later
+    i = j; // jumps i to where we stopped collecting description lines
+    continue; // to check next line
   }
-  
   return projects;
 }
 
+
+
 /**
- * Filter projects based on user tech stack with fallback logic
- * 
- * Algorithm:
- * 1. Select ALL projects matching user tech stack (case-insensitive, partial match)
- * 2. If less than 2 projects matched, add additional top projects as fallback
- * 3. Always return at least 2 projects (if available) for question variety
- * 
- * @param projects - Array of projects from extractProjectsWithTech()
- * @param userTechStack - User's selected technologies (e.g., ["React", "Node.js"])
- * @returns Array with: [all matching projects, ...additional non-matching projects], minimum 2 total
+ * Filter projects based on user tech stack
+ * 0 matched → fallback to top 2 projects from resume
+ * 1 matched → return that 1 project only (all questions about it)
+ * 2+ matched → return all matched projects (LLM distributes questions)
  */
 export function filterProjectsByTech(
   projects: { name: string; tech: string[]; fullText: string }[],
   userTechStack: string[]
 ): { name: string; tech: string[]; fullText: string }[] {
-  
+
+  // no projects or no tech stack → return top 2 as fallback
   if (!projects.length || !userTechStack.length) {
-    // If no projects or empty tech stack, return top 2 projects as fallback
     return projects.slice(0, 2);
   }
 
-  // Normalize user tech stack to lowercase for comparison
-  const normalizedUserTech = userTechStack.map(t => t.toLowerCase().trim()).filter(t => t.length > 0);
-  
-  // Step 1: Filter projects with at least one matching tech
-  const matchedProjects = projects.filter(project => {
-    // Check if any project tech matches any user tech (case-insensitive, partial match)
-    return project.tech.some(projectTech => {
+  // normalize user tech to lowercase for comparison
+  const normalizedUserTech = userTechStack
+    .map(t => t.toLowerCase().trim())
+    .filter(t => t.length > 0);
+
+  // find projects whose tech list overlaps with user's requested tech
+  const matchedProjects = projects.filter(project =>
+    project.tech.some(projectTech => {
       const normalizedProjectTech = projectTech.toLowerCase().trim();
-      
-      // Check for exact match or partial match
       return normalizedUserTech.some(userTech => {
-        // Exact match
-        if (normalizedProjectTech === userTech) return true;
-        
-        // Partial match - check if one contains the other
-        // e.g., "react.js" matches "react", "node.js" matches "node"
-        if (
-          normalizedProjectTech.includes(userTech) ||
-          userTech.includes(normalizedProjectTech)
-        ) {
-          // Avoid false positives - check it's a word boundary
-          const regex = new RegExp(`\\b${escapeRegex(userTech)}\\b|${escapeRegex(userTech)}`, "i");
-          const reversed = new RegExp(`\\b${escapeRegex(normalizedProjectTech)}\\b|${escapeRegex(normalizedProjectTech)}`, "i");
-          return regex.test(normalizedProjectTech) || reversed.test(userTech);
-        }
-        
-        return false;
+        if (normalizedProjectTech === userTech) return true; // exact match e.g. "react" === "react"
+        const regex = new RegExp(`\\b${escapeRegex(userTech)}\\b`, "i"); // partial match e.g. "react.js" matches "react"
+        return regex.test(normalizedProjectTech);
       });
-    });
-  });
-  
-  // Step 2: If less than 2 matched projects, add additional top projects as fallback
-  if (matchedProjects.length < 2) {
-    // Get non-matched projects
-    const matchedNames = new Set(matchedProjects.map(p => p.name.toLowerCase()));
-    const nonMatchedProjects = projects.filter(p => !matchedNames.has(p.name.toLowerCase()));
-    
-    // Add non-matched projects until we have at least 2 total
-    const additionalNeeded = 2 - matchedProjects.length;
-    const fallbackProjects = nonMatchedProjects.slice(0, additionalNeeded);
-    
-    return [...matchedProjects, ...fallbackProjects];
+    })
+  );
+
+  // 0 matched → fallback to top 2 projects
+  if (matchedProjects.length === 0) {
+    return projects.slice(0, 2);
   }
-  
-  // Step 3: Return matched projects (prioritize tech stack matches)
+
+  // 1+ matched → return only matched projects
   return matchedProjects;
 }

@@ -1,6 +1,19 @@
 // API route used by the interview-generation form.
-// Standard mode: Groq generates questions from role / level / tech stack.
-// Resume mode: PDF → extract text → Groq generates questions with full resume context.
+//
+// TWO DISTINCT MODES (No Hybrid):
+//
+// 1. RESUME MODE (FormData with PDF):
+//    - Resume REQUIRED
+//    - PDF → extract text → parse projects
+//    - ALL questions reference extracted projects
+//    - Personalized to candidate's real experience
+//
+// 2. STANDARD MODE (JSON body, no files):
+//    - Resume NOT ALLOWED (ignored if provided in FormData)
+//    - Generic role/tech-based questions
+//    - No project extraction or references
+//    - Pure interview questions
+export const runtime = "nodejs";
 
 import { generateText } from "ai";
 import { groq } from "@/lib/groq";
@@ -12,6 +25,13 @@ import { MAX_RESUME_CHARS, MAX_PDF_BYTES } from "@/lib/rag/constants";
 
 type InterviewMode = "standard" | "resume";
 
+function distributeEvenly(total: number, count: number): number[] {
+  if (count <= 0) return [];
+  const base = Math.floor(total / count);
+  const remainder = total % count;
+  return Array.from({ length: count }, (_, idx) => base + (idx < remainder ? 1 : 0));
+}
+
 export async function POST(request: Request) {
   const contentType = request.headers.get("content-type") ?? "";
 
@@ -21,6 +41,8 @@ export async function POST(request: Request) {
   let techstack: string;
   let amount: number;
   let userid: string;
+  let companyType = "";
+  let jobDescription = "";
   let interviewMode: InterviewMode = "standard";
   let resumeText: string | null = null;
 
@@ -37,18 +59,30 @@ export async function POST(request: Request) {
       level = String(formData.get("level") ?? "");
       techstack = String(formData.get("techstack") ?? "");
       userid = String(formData.get("userid") ?? "");
+      companyType = String(formData.get("companyType") ?? "").trim();
+      jobDescription = String(formData.get("jobDescription") ?? "").trim();
       const amountRaw = formData.get("amount");
       amount =
         typeof amountRaw === "string"
           ? Number(amountRaw)
           : Number(amountRaw ?? NaN);
 
-      // ENHANCEMENT: Allow standard mode to accept optional resume for context-aware questions
-      // Applies to both resume mode (required) and standard mode (optional for project context)
+      // RESUME MODE: Resume is REQUIRED
       const resumePdfFile = formData.get("resumePdf");
       
-      if (resumePdfFile instanceof File) {
-        // Resume file provided (either resume mode or standard mode with optional resume)
+      if (interviewMode === "resume") {
+        // Resume mode MUST have a PDF file
+        if (!(resumePdfFile instanceof File)) {
+          return Response.json(
+            {
+              success: false,
+              error: "Resume mode requires a PDF file upload.",
+            },
+            { status: 400 }
+          );
+        }
+
+        // Validate PDF file
         if (resumePdfFile.size > MAX_PDF_BYTES) {
           return Response.json(
             {
@@ -58,6 +92,7 @@ export async function POST(request: Request) {
             { status: 400 }
           );
         }
+
         const name = resumePdfFile.name.toLowerCase();
         const mime = resumePdfFile.type;
         if (
@@ -74,28 +109,22 @@ export async function POST(request: Request) {
           );
         }
 
+        // Extract (Send this PDF to Python and give me back text )and validate resume text
         const buf = Buffer.from(await resumePdfFile.arrayBuffer());
         const extracted = await extractTextFromPdfBuffer(buf);
         resumeText = normalizeResumeText(extracted);
 
         if (!resumeText.length) {
-          const message =
-            interviewMode === "resume"
-              ? "No text could be read from this PDF. Use a text-based PDF (not a scanned image) or export again from your editor."
-              : "Resume provided but no text could be extracted. Proceeding with standard mode.";
-          
-          if (interviewMode === "resume") {
-            return Response.json(
-              {
-                success: false,
-                error: message,
-              },
-              { status: 400 }
-            );
-          }
-          // For standard mode, resumeText stays null and we proceed without context
+          return Response.json(
+            {
+              success: false,
+              error: "No text could be read from this PDF. Use a text-based PDF (not a scanned image) or export again from your editor.",
+            },
+            { status: 400 }
+          );
         }
-        if (resumeText && resumeText.length > MAX_RESUME_CHARS) {
+
+        if (resumeText.length > MAX_RESUME_CHARS) {
           return Response.json(
             {
               success: false,
@@ -104,17 +133,15 @@ export async function POST(request: Request) {
             { status: 400 }
           );
         }
-      } else if (interviewMode === "resume") {
-        // Resume mode requires a PDF file
-        return Response.json(
-          {
-            success: false,
-            error: "Upload a PDF resume for resume-based interviews.",
-          },
-          { status: 400 }
-        );
+      } else {
+        // STANDARD MODE: Ignore any uploaded PDF (FormData but standard mode)
+        // No resume processing in standard mode
+        if (resumePdfFile instanceof File) {
+          console.log("[INFO] Standard mode: ignoring uploaded PDF file");
+        }
       }
     } else {
+      // Assume JSON body for standard mode (no file upload)
       const body = (await request.json()) as {
         type?: string;
         role?: string;
@@ -122,6 +149,8 @@ export async function POST(request: Request) {
         techstack?: string;
         amount?: number;
         userid?: string;
+        companyType?: string;
+        jobDescription?: string;
         mode?: InterviewMode;
       };
 
@@ -139,15 +168,19 @@ export async function POST(request: Request) {
         );
       }
 
+      // For standard mode, read parameters from JSON body
       type = (body.type ?? "").trim();
       role = (body.role ?? "").trim();
       level = (body.level ?? "").trim();
       techstack = (body.techstack ?? "").trim();
       userid = (body.userid ?? "").trim();
+      companyType = (body.companyType ?? "").trim();
+      jobDescription = (body.jobDescription ?? "").trim();
       amount = Number(body.amount);
     }
 
     if (
+      // Basic validation of required parameters
       !type ||
       !role ||
       !level ||
@@ -166,216 +199,107 @@ export async function POST(request: Request) {
     let prompt: string;
 
     if (interviewMode === "resume" && resumeText) {
-      // Normalize resume text
+      // RESUME MODE: Prefer projects aligned with selected tech stack.
       const fullResumeText = normalizeResumeText(resumeText);
-      
-      // Extract and filter projects by user's tech stack
       const allProjects = extractProjectsWithTech(fullResumeText);
-      const userTechArray = techstack.split(",").map(t => t.trim()).filter(t => t.length > 0);
-      const filteredProjects = filterProjectsByTech(allProjects, userTechArray);
-      
-      console.log("\n========== RESUME MODE ==========");
+      const requestedTech = techstack
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean);
+      const matchedProjects = filterProjectsByTech(allProjects, requestedTech);
+      const projectsForPrompt = matchedProjects;
+
+      console.log("========== RESUME MODE ==========");
       console.log(`[RESUME] Full Resume Text Size: ${fullResumeText.length} chars`);
       console.log(`[RESUME] All Projects Extracted: ${allProjects.length}`);
-      console.log(`[RESUME] Filtered Projects: ${filteredProjects.length}`);
-      console.log(`[RESUME] User Tech Stack: ${userTechArray.join(", ")}`);
-      filteredProjects.forEach((p, idx) => {
+      console.log(`[RESUME] Requested Tech: ${requestedTech.join(", ") || "none"}`);
+      console.log(`[RESUME] Matched Projects: ${matchedProjects.length}`);
+      console.log(`[RESUME] Projects Used For Prompt: ${projectsForPrompt.length}`);
+      allProjects.forEach((p, idx) => {
         console.log(`[RESUME]   [${idx + 1}] ${p.name} (${p.tech.join(", ")})`);
       });
       console.log("==================================\n");
 
-      // Build the filtered projects display
-      const projectsDisplay = filteredProjects
+      if (projectsForPrompt.length === 0) {
+        return Response.json(
+          {
+            success: false,
+            error:
+              "Could not extract project details from the uploaded resume. Please upload a resume with a clear PROJECTS section.",
+          },
+          { status: 400 }
+        );
+      }
+
+      const projectContextHeader =
+        matchedProjects.length > 0
+          ? `PROJECT CONTEXT (matching selected tech stack: ${requestedTech.join(", ")}):`
+          : "PROJECT CONTEXT (fallback to top 2 extracted projects):";
+
+      const distribution = distributeEvenly(amount, projectsForPrompt.length);
+      const distributionPlan = projectsForPrompt
+        .map((p, idx) => `- ${p.name}: ${distribution[idx]} question(s)`)
+        .join("\n");
+
+      // Build the projects display from selected context.
+      const projectsDisplay = projectsForPrompt
         .map(p => `Project: ${p.name}
 Technologies: ${p.tech.join(", ")}
 Description: ${p.fullText}`)
         .join("\n\n");
 
-      prompt = `You are a senior engineer performing a production-level code review of a candidate's REAL projects.
+      prompt = `You are a senior interviewer creating resume-grounded interview questions.
 
-USER TECH STACK:
-${userTechArray.join(", ")}
-
-RELEVANT PROJECTS FROM RESUME:
+${projectContextHeader}
 ${projectsDisplay}
 
-CRITICAL RULES (STRICT - MUST FOLLOW):
-
-1. You MUST ONLY use the project names listed above.
-   - DO NOT invent any project
-   - DO NOT rename or generalize project names
-
-2. EVERY question MUST:
-   - Include EXACT project name
-   - Include at least ONE relevant technology (from tech stack or project)
-   - Include a REAL technical scenario (failure, edge case, scale issue, or internal behavior)
-
-3. ABSOLUTELY DO NOT ask generic questions like:
-   - "Explain your project"
-   - "How did you build"
-   - "What technologies did you use"
-
-4. EVERY question MUST feel like:
-   - debugging a production issue
-   - reviewing real implementation
-   - analyzing system behavior under stress
-
-5. FORCE DEEP TECHNICAL THINKING:
-Each question MUST include at least one of:
-   - memory usage behavior
-   - event loop or async flow
-   - API request/response lifecycle
-   - database query behavior
-   - concurrency or race conditions
-   - model behavior (for ML projects)
-   - failure handling (timeouts, retries, crashes)
-   - performance bottlenecks
-
-6. Questions MUST follow patterns like:
-   - "In your [project], what happens when [failure scenario] occurs in [technology]?"
-   - "How does your [project] handle [edge case] when [system constraint] is reached?"
-   - "In [project], how is [internal mechanism] affected when [scale/load increases]?"
-
-7. PRIORITIZE USER TECH STACK:
-   - Prefer questions involving: ${userTechArray.join(", ")}
-   - Combine project + tech stack + system behavior in ONE question
-
-8. QUESTIONS MUST BE SPECIFIC:
-   - Mention concrete scenarios (e.g., large cart size, high traffic, missing data, API failure)
-   - Avoid vague wording
-
-9. Generate EXACTLY ${amount} questions.
-10. Return ONLY a JSON array of strings.
-11. No markdown, no explanations, no special characters like backticks or slashes.
-
-FINAL INSTRUCTION:
-If a question is generic or does not involve a real system behavior, DISCARD it and generate a better one.`;
-    } else {
-      // STANDARD MODE: Check for optional project context
-      let standardModeProjectContext = "";
-      let hasStandardModeProjectContext = false;
-
-      if (resumeText) {
-        // Resume was provided (optional) in standard mode - check for project context
-        const allProjects = extractProjectsWithTech(resumeText);
-        const userTechArray = techstack
-          .split(",")
-          .map(t => t.trim())
-          .filter(t => t.length > 0);
-
-        // Check if any project tech matches user's tech stack
-        const hasMatch = allProjects.some(p =>
-          p.tech.some(t =>
-            userTechArray.some(u =>
-              t.toLowerCase().includes(u.toLowerCase())
-            )
-          )
-        );
-
-        if (hasMatch && allProjects.length > 0) {
-          hasStandardModeProjectContext = true;
-          standardModeProjectContext = allProjects
-            .map(
-              p => `Project: ${p.name}
-Technologies: ${p.tech.join(", ")}`
-            )
-            .join("\n\n");
-
-          console.log("\n========== STANDARD MODE WITH PROJECT CONTEXT ==========");
-          console.log(`[STANDARD] Found ${allProjects.length} projects`);
-          console.log(
-            `[STANDARD] Tech match detected: ${userTechArray.join(", ")}`
-          );
-          console.log(
-            `[STANDARD] Using ${allProjects.length} projects in prompt`
-          );
-          console.log("=======================================================\n");
-        }
-      }
-
-      // Build appropriate prompt based on whether project context exists
-      if (hasStandardModeProjectContext) {
-        // Enhanced standard mode with project context
-        prompt = `You are a senior engineer diagnosing REAL production issues for a ${role} position.
-Your goal is to ask questions that reveal how candidates understand SYSTEM BEHAVIOR under failure and edge cases.
-This is NOT an interview - it's a technical investigation.
-
-Position Context:
+INTERVIEW CONTEXT:
 - Role: ${role}
 - Experience Level: ${level}
-- Tech Stack: ${techstack}
-- Interview Type: Technical (Production Diagnostics with Project Context)
+- Tech Stack Focus: ${techstack}
+- Interview Type: ${type}
 
-CANDIDATE PROJECTS (From Resume):
-${standardModeProjectContext}
+QUESTION DISTRIBUTION PLAN (mandatory):
+${distributionPlan}
 
-⚠️ CRITICAL RULES - NO EXCEPTIONS:
+CRITICAL RULES:
 
-ABSOLUTELY FORBIDDEN PHRASES:
-❌ "How would you..."
-❌ "Walk me through..."
-❌ "Explain..."
-❌ "Describe..."
-❌ "Tell me about..."
-❌ "What would you do..."
-❌ "How do you approach..."
+1. Use ONLY facts from the provided project context.
+   - Do NOT invent projects, features, or tools.
+   - Keep each question clearly tied to the candidate's real work.
 
-ONLY ALLOWED QUESTION STARTERS:
-✓ "What happens when..."
-✓ "What occurs if..."
-✓ "How does your system behave when..."
-✓ "What's the runtime impact when..."
-✓ "Which race condition occurs when..."
-✓ "What state inconsistency appears when..."
+2. Prefer questions about implementation choices and practical trade-offs.
+   - Ask about architecture decisions, retrieval quality, indexing strategy, embedding choices, evaluation, and debugging.
+   - Include at least one specific technology or concept from context (e.g., FAISS, RAG, embeddings, reranking, query expansion, caching).
 
-MANDATORY REQUIREMENTS:
+3. DO NOT force every question into outage/concurrency/failure phrasing.
+   - Failures and scaling can appear, but only when naturally relevant.
+   - Keep a balanced set of practical interview questions.
 
-1. At least 1-2 questions MUST reference a project name from the list above.
-   - Use EXACT project names only
-   - NEVER invent or rename projects
-   - Questions linking projects should combine: project + tech + system behavior
+4. Avoid generic prompts:
+   - "Tell me about your project"
+   - "What technologies did you use"
+   - "Explain your resume"
 
-2. Remaining questions can focus on tech stack or system-level scenarios.
+5. Question style:
+   - Technical mode: concrete, implementation-focused, scenario-backed.
+   - Behavioral mode: specific incident/decision from real project execution.
+   - Mixed mode: combine both.
 
-3. Each question MUST use ONLY allowed starters (What happens when, What occurs if, etc.).
+6. ALWAYS naturally reference the project name inside the question itself.
+   - Example: "In your Agri360 RAG Bot, what happens when FAISS index grows beyond memory limits?"
+   - Do NOT write generic questions - always tie to a specific project from context.
 
-4. Tech-specific scenarios:
-${level === "junior" ? `
-   - Scenarios understandable but revealing gaps
-   - Include real implementation challenges
-   - Avoid overly complex distributed systems
-` : level === "mid-level" ? `
-   - Assume knowledge of basic patterns
-   - Focus on real-world scenarios and trade-offs
-   - Ask about optimization and system design
-` : `
-   - Assume deep knowledge
-   - Ask about complex edge cases
-   - Focus on system-level design and production issues
-`}
-
-5. Questions must cover:
-   - Event loop blocking or async race conditions
-   - Memory leaks or unbounded growth
-   - Database query patterns (N+1, connection exhaustion)
-   - API failure or partial data scenarios
-   - Concurrency or race conditions
-   - Performance bottlenecks under load
-
-6. Generate EXACTLY ${amount} questions.
-7. Return ONLY a JSON array of strings.
-8. No markdown, backticks, or slashes.
-
-Quality Gate:
-- If a question doesn't reference a project, ask about tech stack or system behavior.
-- If too many questions reference projects with similar failure modes, diversify.
-- Every question must sound like a post-mortem, not a textbook interview.
-
-Return ONLY JSON array:
-["Question 1", "Question 2", ..., "Question ${amount}"]`;
-      } else {
-        // Standard mode without project context (normal flow)
-        prompt = `You are a senior engineer diagnosing REAL production issues for a ${role} position.
+7. Generate EXACTLY ${amount} questions.
+8. Return ONLY a JSON array of strings.
+9. Follow the exact distribution plan above.
+10. Return questions in grouped order by project as listed in the plan.
+11. No markdown or explanations.`;
+    } 
+    
+    else {
+      // STANDARD MODE: Generic role/tech-based questions, NO resume context
+      prompt = `You are a senior engineer diagnosing REAL production issues for a ${role} position.
 Your goal is to ask questions that reveal how candidates understand SYSTEM BEHAVIOR under failure and edge cases.
 This is NOT an interview - it's a technical investigation.
 
@@ -569,9 +493,7 @@ Behavioral Questions:
 Return ONLY JSON array:
 ["Question 1", "Question 2", ..., "Question ${amount}"]
 `}`;
-      }  // close nested else for project context
-      }  // close nested if for project context
-    }  // close main else for standard mode
+    }
 
     const { text: responseText } = await generateText({
       model: groq("llama-3.3-70b-versatile"),
@@ -602,56 +524,33 @@ Return ONLY JSON array:
       );
     }
     
-    // VALIDATION: For resume mode, validate questions reference only filtered projects
-    if (interviewMode === "resume") {
-      const allProjects = extractProjectsWithTech(resumeText!);
-      const userTechArray = techstack.split(",").map(t => t.trim()).filter(t => t.length > 0);
-      const filteredProjects = filterProjectsByTech(allProjects, userTechArray);
-      
-      // Extract project names from filtered projects
-      const validProjectNames = filteredProjects.map(p => p.name);
-      
-      // Extract ALL project names from the full resume (for checking invalid ones)
-      const allProjectNames = allProjects.map(p => p.name);
-      
-      // Validate each question
-      const validationErrors: string[] = [];
-      
-      questions.forEach((question, idx) => {
-        const questionNum = idx + 1;
-        
-        // Check 1: Question must include at least one valid project name
-        const hasValidProject = validProjectNames.some(projectName => 
-          question.includes(projectName)
-        );
-        
-        if (!hasValidProject) {
-          validationErrors.push(`Question ${questionNum} does not reference any filtered project`);
-        }
-        
-        // Check 2: Question must not include invalid project names (from resume but not filtered)
-        const invalidProjectsInQuestion = allProjectNames.filter(projectName =>
-          !validProjectNames.includes(projectName) && question.includes(projectName)
-        );
-        
-        if (invalidProjectsInQuestion.length > 0) {
-          validationErrors.push(`Question ${questionNum} references invalid projects: ${invalidProjectsInQuestion.join(", ")}`);
-        }
-      });
-      
-      if (validationErrors.length > 0) {
-        console.error("\n========== QUESTION VALIDATION FAILED ==========");
-        validationErrors.forEach(err => console.error(`[VALIDATION ERROR] ${err}`));
-        console.error("==============================================\n");
-        throw new Error(`Generated questions failed validation:\n${validationErrors.join("\n")}`);
+    // QUALITY VALIDATION: Check question format and depth (applies to all modes)
+    const technicalPhrases = ["what happens", "what occurs", "how does", "when", "impact", "handle", "behavior", "cause", "result"];
+    const qualityErrors: string[] = [];
+
+    questions.forEach((question, idx) => {
+      const questionNum = idx + 1;
+      const q = question.toLowerCase();
+
+      // Check 1: Minimum length
+      if (question.trim().length < 20) {
+        qualityErrors.push(`Question ${questionNum} is too short (min 20 chars)`);
       }
-      
-      console.log("\n========== QUESTION VALIDATION PASSED ==========");
-      console.log(`[VALIDATION] All ${questions.length} questions include filtered project names`);
-      console.log(`[VALIDATION] No invalid project names detected`);
-      console.log("==============================================\n");
+
+      // Check 2: Contains technical language
+      const hasTechnicalPhrase = technicalPhrases.some(phrase => q.includes(phrase));
+      if (!hasTechnicalPhrase) {
+        qualityErrors.push(`Question ${questionNum} lacks technical depth (no phrases like "what happens", "impact", etc.)`);
+      }
+    });
+
+    if (qualityErrors.length > 0) {
+      console.warn("\n========== QUALITY CHECK WARNINGS ==========");
+      qualityErrors.forEach(err => console.warn(`[QUALITY] ${err}`));
+      console.warn("==============================================\n");
+      // Continue anyway - these are warnings, not blockers
     }
-    
+
     // DEBUG: Log generated questions
     console.log("\n========== QUESTIONS GENERATED ==========");
     console.log(`[GENERATED] Mode: ${interviewMode}`);
@@ -672,6 +571,8 @@ Return ONLY JSON array:
       coverImage: getRandomInterviewCover(),
       createdAt: new Date().toISOString(),
       interviewMode: interviewMode,
+      companyType,
+      jobDescription,
     };
 
     const newInterview = await db.collection("interviews").add(interview);

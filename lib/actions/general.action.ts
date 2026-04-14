@@ -45,6 +45,42 @@ export async function createFeedback(params: CreateFeedbackParams) {
       throw new Error("No valid transcript content to analyze");
     }
 
+    const interviewDoc = await db.collection("interviews").doc(interviewId).get();
+    const interviewData = interviewDoc.exists ? interviewDoc.data() : null;
+    const jobDescription =
+      interviewData?.jobDescription?.trim() ||
+      "No job description provided. Evaluate based on general professional standards.";
+
+    const culturalFitPrompt = `
+You are an expert hiring manager and behavioral interviewer.
+
+JOB DESCRIPTION:
+${jobDescription}
+
+INTERVIEW TRANSCRIPT:
+${formattedTranscript}
+
+STEP 1: Extract company expectations from the job description:
+- Values and culture
+- Work environment expectations
+- Behavioral expectations
+
+STEP 2: Analyze candidate from transcript:
+- Communication clarity
+- Problem solving approach
+- Ownership and accountability
+- Collaboration signals
+- Growth mindset
+
+STEP 3: Compare candidate against company expectations and score Cultural & Role Fit.
+
+Rules:
+- Base everything strictly on the transcript
+- No generic answers, cite specific moments from transcript
+- Keep Cultural & Role Fit score aligned to the same 0-100 scale used by other categories
+- Keep it concise and evidence-based
+`;
+
     // Use text generation and parse the JSON 
     let object: any;
     try {
@@ -54,6 +90,9 @@ export async function createFeedback(params: CreateFeedbackParams) {
 
 Transcript:
 ${formattedTranscript}
+
+For category "Cultural & Role Fit", you MUST use this guidance:
+${culturalFitPrompt}
 
 IMPORTANT: You MUST respond with ONLY a valid JSON object. Do not add any text before or after the JSON. Do not wrap it in markdown code blocks.
 

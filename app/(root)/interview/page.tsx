@@ -23,6 +23,7 @@ import { getCurrentUser } from "@/lib/actions/auth.action";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
 import { MAX_PDF_BYTES } from "@/lib/rag/constants";
+import { COMPANY_JDS } from "@/constants";
 
 const formSchema = z.object({
   mode: z.enum(["standard", "resume"]),
@@ -39,6 +40,8 @@ const formSchema = z.object({
     message: "Tech stack must be at least 2 characters.",
   }),
   amount: z.coerce.number().min(1).max(10),
+  companyType: z.string().optional(),
+  customJD: z.string().optional(),
 });
 
 export type InterviewFormValues = z.output<typeof formSchema>;
@@ -66,6 +69,8 @@ const InterviewGenerationPage = () => {
       level: "junior",
       techstack: "",
       amount: 5,
+      companyType: "",
+      customJD: "",
     },
   });
 
@@ -107,6 +112,11 @@ const InterviewGenerationPage = () => {
       return;
     }
 
+    const jobDescription =
+      values.customJD?.trim() ||
+      COMPANY_JDS[values.companyType?.trim() || ""] ||
+      "";
+
     setIsSubmitting(true);
     try {
       if (values.mode === "resume" && resumePdf) {
@@ -118,6 +128,8 @@ const InterviewGenerationPage = () => {
         fd.append("techstack", values.techstack);
         fd.append("amount", String(values.amount));
         fd.append("userid", userId);
+        fd.append("companyType", values.companyType?.trim() || "");
+        fd.append("jobDescription", jobDescription);
         fd.append("resumePdf", resumePdf);
 
         const response = await fetch("/api/vapi/generate", {
@@ -148,6 +160,8 @@ const InterviewGenerationPage = () => {
             techstack: values.techstack,
             amount: values.amount,
             userid: userId,
+            companyType: values.companyType?.trim() || "",
+            jobDescription,
             mode: "standard",
           }),
         });
@@ -205,12 +219,7 @@ const InterviewGenerationPage = () => {
                     </label>
                   </div>
                 </FormControl>
-                <FormDescription>
-                  Standard mode generates questions from your role and stack only.
-                  Resume mode extracts text from your PDF, runs free TF-IDF retrieval
-                  over chunks, then Groq generates tailored questions. No paid
-                  embedding APIs.
-                </FormDescription>
+              
                 <FormMessage />
               </FormItem>
             )}
@@ -321,6 +330,55 @@ const InterviewGenerationPage = () => {
                 <FormControl>
                   <Input type="number" min="1" max="10" {...field} />
                 </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name="companyType"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Company Profile (for Cultural & Role Fit)</FormLabel>
+                <FormControl>
+                  <select
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    value={field.value || ""}
+                    onChange={field.onChange}
+                  >
+                    <option value="">Select company profile (optional)</option>
+                    <option value="google">Google-style</option>
+                    <option value="startup">Startup-style</option>
+                    <option value="corporate">Corporate-style</option>
+                  </select>
+                </FormControl>
+                <FormDescription>
+                  Use a predefined company culture profile, or provide a custom
+                  job description below.
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name="customJD"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Custom Job Description (optional)</FormLabel>
+                <FormControl>
+                  <textarea
+                    className="w-full min-h-32 rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    placeholder="Paste the job description here. If provided, this overrides the company profile."
+                    {...field}
+                  />
+                </FormControl>
+                <FormDescription>
+                  This will be used to evaluate &quot;Cultural &amp; Role
+                  Fit&quot; using the final transcript.
+                </FormDescription>
                 <FormMessage />
               </FormItem>
             )}

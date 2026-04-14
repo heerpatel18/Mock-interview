@@ -39,3 +39,30 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+
+# ------------------------
+# Python (FastAPI service)
+# ------------------------
+__pycache__/
+*.pyc
+
+# ------------------------
+# PDF / Data files
+# ------------------------
+*.pdf
+
+# ------------------------
+# ML / OCR models
+# ------------------------
+*.traineddata
+
+# ------------------------
+# Output / temp folders
+# ------------------------
+output/
+
+# ------------------------
+# Local files
+# ------------------------
+*.log

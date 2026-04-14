@@ -181,12 +181,26 @@ export const feedbackSchema = z.object({
 
 
 
-
-
-
-
-//
-
+export const COMPANY_JDS: Record<string, string> = {
+  google: `
+    Google values intellectual curiosity, collaborative problem solving, and
+    data-driven decision making. We look for candidates who take ownership,
+    communicate clearly, think from first principles, and thrive in ambiguous
+    situations. We value humility, learning from failure, and building for scale.
+  `,
+  startup: `
+    We value speed, ownership, and scrappiness. Candidates should be comfortable
+    with ambiguity, wear multiple hats, move fast, take initiative without being
+    told, and have a bias for action. We value transparency, direct communication,
+    and customer obsession.
+  `,
+  corporate: `
+    We value process adherence, stakeholder communication, cross-team collaboration,
+    and structured problem solving. Candidates should demonstrate leadership
+    potential, risk awareness, documentation habits, and ability to work within
+    established frameworks while driving incremental improvement.
+  `,
+};
 
 export const interviewCovers = [
   "/adobe.png",
