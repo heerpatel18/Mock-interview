@@ -104,62 +104,80 @@ export const mappings = {
 
 
 //
-
-
-
 export const interviewer: CreateAssistantDTO = {
   name: "Interviewer",
-  firstMessage:
-    "Hello! Thank you for taking the time to speak with me today. I'm excited to learn more about you and your experience.",
+
+  firstMessage: "Hello, thank you for taking time to speak with me today i am excited to learn more about you and your experience.",
+
+  // 🎤 Speech-to-Text
   transcriber: {
     provider: "deepgram",
     model: "nova-2",
-    language: "en",
+    language: "en", // ✅ Hindi + English + Hinglish
   },
+
+  //  Voice (keep same)
   voice: {
     provider: "11labs",
-    voiceId: "sarah",
+    voiceId: "21m00Tcm4TlvDq8ikWAM",
     stability: 0.4,
     similarityBoost: 0.8,
     speed: 0.9,
     style: 0.5,
     useSpeakerBoost: true,
   },
+
+  //  LLM
   model: {
     provider: "openai",
-    model: "gpt-4",
+    model: "gpt-4o-mini",
     messages: [
       {
         role: "system",
-        content: `You are a professional job interviewer conducting a real-time voice interview with a candidate. Your goal is to assess their qualifications, motivation, and fit for the role.
+        content: `
+You are a professional AI interviewer conducting a real-time voice interview.
 
-Interview Guidelines:
-Follow the structured question flow:
+Language: {{language}}
+
+========================
+IMPORTANT LANGUAGE RULES
+========================
+
+- If language is "English":
+  - Respond normally in professional English
+
+STRICT RULES:
+- Do NOT switch language mid-response
+- Do NOT produce Hinglish sentences
+- Keep output consistent with selected language
+
+========================
+INTERVIEW FLOW
+========================
+
+Follow these questions exactly:
 {{questions}}
 
-Engage naturally & react appropriately:
-Listen actively to responses and acknowledge them before moving forward.
-Ask brief follow-up questions if a response is vague or requires more detail.
-Keep the conversation flowing smoothly while maintaining control.
-Be professional, yet warm and welcoming:
+- Ask one question at a time
+- Wait for user response
+- Ask short follow-up if needed
+- Keep conversation natural
 
-Use official yet friendly language.
-Keep responses concise and to the point (like in a real voice interview).
-Avoid robotic phrasing—sound natural and conversational.
-Answer the candidate’s questions professionally:
+========================
+STYLE
+========================
 
-If asked about the role, company, or expectations, provide a clear and relevant answer.
-If unsure, redirect the candidate to HR for more details.
+- Keep responses SHORT (voice-friendly)
+- Sound natural, not robotic
+- Be polite and professional
 
-Conclude the interview properly:
-Thank the candidate for their time.
-Inform them that the company will reach out soon with feedback.
-End the conversation on a polite and positive note.
+========================
+ENDING
+========================
 
-
-- Be sure to be professional and polite.
-- Keep all your responses short and simple. Use official language, but be kind and welcoming.
-- This is a voice conversation, so keep your responses short, like in a real conversation. Don't ramble for too long.`,
+- Thank the candidate
+- End politely after all questions
+`,
       },
     ],
   },
@@ -168,10 +186,10 @@ End the conversation on a polite and positive note.
 export const feedbackSchema = z.object({
   totalScore: z.number().min(0).max(100),
   categoryScores: z.array(z.object({
-    name: z.enum(["Communication Skills", "Technical Knowledge", "Problem-Solving", "Cultural & Role Fit", "Confidence & Clarity"]),
+    name: z.enum(["Communication Skills", "Technical Knowledge", "Problem-Solving", "Cultural Fit", "Role Fit", "Confidence & Clarity"]),
     score: z.number().min(0).max(100),
     comment: z.string(),
-  })).length(5),
+  })).length(6),
   strengths: z.array(z.string()),
   areasForImprovement: z.array(z.string()),
   finalAssessment: z.string(),
@@ -181,26 +199,7 @@ export const feedbackSchema = z.object({
 
 
 
-export const COMPANY_JDS: Record<string, string> = {
-  google: `
-    Google values intellectual curiosity, collaborative problem solving, and
-    data-driven decision making. We look for candidates who take ownership,
-    communicate clearly, think from first principles, and thrive in ambiguous
-    situations. We value humility, learning from failure, and building for scale.
-  `,
-  startup: `
-    We value speed, ownership, and scrappiness. Candidates should be comfortable
-    with ambiguity, wear multiple hats, move fast, take initiative without being
-    told, and have a bias for action. We value transparency, direct communication,
-    and customer obsession.
-  `,
-  corporate: `
-    We value process adherence, stakeholder communication, cross-team collaboration,
-    and structured problem solving. Candidates should demonstrate leadership
-    potential, risk awareness, documentation habits, and ability to work within
-    established frameworks while driving incremental improvement.
-  `,
-};
+
 
 export const interviewCovers = [
   "/adobe.png",

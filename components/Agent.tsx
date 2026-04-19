@@ -10,7 +10,7 @@
 "use client";
 
 import Image from "next/image";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 
 import { cn } from "@/lib/utils";
@@ -36,6 +36,7 @@ const Agent = ({
   feedbackId,
   type,
   questions,
+  language = "en",
 }: AgentProps) => { 
   const router = useRouter();
   const [callStatus, setCallStatus] = useState<CallStatus>(CallStatus.INACTIVE);   // State to track current status of the call (inactive, connecting, active, finished). 
@@ -43,12 +44,31 @@ const Agent = ({
   const [isSpeaking, setIsSpeaking] = useState(false);      // State to track if AI interviewer is currently speaking
   const [lastMessage, setLastMessage] = useState<string>(""); //  State to store content of the last message received
 
+  // Interview state management
+  const [interviewStage, setInterviewStage] = useState<'greeting' | 'waitingGreetingReply' | 'startInterview' | 'question1' | 'question2' | 'question3' | 'completed'>('greeting');
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+
+  // ✅ Add stop and feedback refs
+  const stopRef = useRef(false);
+  const feedbackGeneratedRef = useRef(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
     
-    const onCallStart = () => {
-      console.log("Call started");
+    const onCallStart = async () => {
+      console.log("✅ Call started");
       setCallStatus(CallStatus.ACTIVE);
+      
+      // Log all questions at the start of interview
+      if (questions && questions.length > 0) {
+        console.log("\n========== INTERVIEW QUESTIONS ==========");
+        console.log(`Total Questions: ${questions.length}`);
+        questions.forEach((q, idx) => {
+          console.log(`[${idx + 1}] ${q}`);
+        });
+        console.log("=========================================\n");
+      }
     };
 
     const onCallEnd = () => {
@@ -57,97 +77,95 @@ const Agent = ({
     };
 
     const onMessage = (message: any) => { 
-      console.log("Message received:", message); // Debug log
+      console.log("📩 RAW MESSAGE RECEIVED:", message);
       
-      // Check for transcript messages with final transcripts . Depending on how Vapi sends the final transcript, we check multiple possible structures in the message object to extract the transcript text and role. Once we identify a message that contains the final transcript, we add it to our local messages state with the appropriate role (e.g., "interviewer") and content (the transcript text). This ensures that we capture the final interview transcript accurately for feedback generation later.
+      // Only handle final transcripts, ignore partial ones
       if (message.type === "transcript" && message.transcriptType === "final") {
+        console.log("🗣️ FINAL TRANSCRIPT [" + (message.role === "user" ? "USER" : "AI") + "]:", message.transcript);
         const newMessage = { role: message.role, content: message.transcript };
-        setMessages((prev) => [...prev, newMessage]);
-        console.log("Added final transcript message:", newMessage);
+        setMessages((prev) => {
+          // Avoid duplicates - check if we already have this message
+          const exists = prev.some(m => m.role === newMessage.role && m.content === newMessage.content);
+          if (!exists) {
+            return [...prev, newMessage];
+          }
+          return prev;
+        });
         return;
       }
       
-      // Alternative: Check for message with role and transcript directly 
-      if (message.role && message.transcript) {
-        const newMessage = { role: message.role, content: message.transcript };
-        setMessages((prev) => [...prev, newMessage]);
-        console.log("Added transcript from message.transcript:", newMessage);
+      // Skip partial transcripts and other incremental updates
+      if (message.transcriptType === "partial") {
         return;
       }
       
-      // Alternative: Check for message with role and text
+      // Fallback cases - but avoid duplicates
+      if (message.role && message.transcript && message.transcriptType !== "partial") {
+        console.log("🗣️ TRANSCRIPT [" + (message.role === "user" ? "USER" : "AI") + "]:", message.transcript);
+        const newMessage = { role: message.role, content: message.transcript };
+        setMessages((prev) => {
+          const exists = prev.some(m => m.role === newMessage.role && m.content === newMessage.content);
+          if (!exists) {
+            return [...prev, newMessage];
+          }
+          return prev;
+        });
+        return;
+      }
+
       if (message.role && message.text) {
+        console.log("🤖 AI MESSAGE:", message.text);
         const newMessage = { role: message.role, content: message.text };
-        setMessages((prev) => [...prev, newMessage]);
-        console.log("Added message from message.text:", newMessage);
+        setMessages((prev) => {
+          const exists = prev.some(m => m.role === newMessage.role && m.content === newMessage.content);
+          if (!exists) {
+            return [...prev, newMessage];
+          }
+          return prev;
+        });
         return;
       }
       
       // Alternative: Check for message with message field (nested)
       if (message.message?.role && message.message?.content) {
         const newMessage = { role: message.message.role, content: message.message.content };
-        setMessages((prev) => [...prev, newMessage]);
+        setMessages((prev) => {
+          const exists = prev.some(m => m.role === newMessage.role && m.content === newMessage.content);
+          if (!exists) {
+            return [...prev, newMessage];
+          }
+          return prev;
+        });
         console.log("Added nested message:", newMessage);
         return;
       }
     };
     
-    // Handle transcript updates from Vapi
+    // Disable transcript events to avoid duplicates - we handle transcripts via onMessage
     const onTranscript = (message: any) => {
-      console.log("Transcript event:", message);
-      if (message.role && message.transcript) {
-        const newMessage = { role: message.role, content: message.transcript };
-        setMessages((prev) => [...prev, newMessage]);
-        console.log("Added message from transcript event:", newMessage);
-      }
+      // Skip this to avoid duplicate handling
+      return;
     };
     
-    // Handle speech-update events which may contain transcripts
+    // Disable speech-update events to avoid incremental updates
     const onSpeechUpdate = (data: any) => {
-      console.log("Speech update:", data);
-      if (data.role && data.text) {
-        const newMessage = { role: data.role, content: data.text };
-        setMessages((prev) => [...prev, newMessage]);
-        console.log("Added message from speech update:", newMessage);
-      }
+      // Skip this to avoid incremental updates
+      return;
     };
     
-    // Handle conversation-update events
+    // Disable conversation-update events to avoid duplicates
     const onConversationUpdate = (data: any) => {
-      console.log("Conversation update:", data);
-      
-      // If it's a messages array
-      if (Array.isArray(data)) {
-        data.forEach((msg: any) => {
-          if (msg.role && (msg.content || msg.text || msg.transcript)) {
-            const newMessage = { 
-              role: msg.role, 
-              content: msg.content || msg.text || msg.transcript 
-            };
-            setMessages((prev) => [...prev, newMessage]);
-            console.log("Added message from conversation update:", newMessage);
-          }
-        });
-      }
-      
-      // If it's a single message with role and content
-      if (data.role && (data.content || data.text || data.transcript)) {
-        const newMessage = { 
-          role: data.role, 
-          content: data.content || data.text || data.transcript 
-        };
-        setMessages((prev) => [...prev, newMessage]);
-        console.log("Added message from conversation update:", newMessage);
-      }
+      // Skip this to avoid duplicate handling
+      return;
     };
 
     const onSpeechStart = () => {
-      console.log("speech start");
+      console.log("🎤 AI STARTED SPEAKING [Voice: " + (language === "hi" ? "Saavi (Hindi)" : "Sarah (English)") + "]");
       setIsSpeaking(true);
     };
 
     const onSpeechEnd = () => {
-      console.log("speech end");
+      console.log("🔇 AI STOPPED SPEAKING");
       setIsSpeaking(false);
     };
 
@@ -176,7 +194,7 @@ const Agent = ({
       vapi.off("speech-end", onSpeechEnd);
       vapi.off("error", onError);
     };
-  }, []);
+  }, [language, questions]);
 
 
 
@@ -190,6 +208,13 @@ const Agent = ({
     // MAIN 2 
     //sends transcript to the backend.
     const handleGenerateFeedback = async (messages: SavedMessage[]) => {
+      // ✅ Prevent multiple feedback generation
+      if (feedbackGeneratedRef.current) {
+        console.log("Feedback already generated, skipping");
+        return;
+      }
+
+      feedbackGeneratedRef.current = true;
      
       // Ensure we have messages to process
       if (!messages || messages.length === 0) {
@@ -264,12 +289,53 @@ const Agent = ({
 
 
   //MAIN 1
-  const handleCall = async () => {
+const handleCall = async () => {
+  console.log("📱 Call button clicked");
+  console.log("Language:", language);
+  console.log("Interview type:", type);
+  console.log("Questions:", questions);
+  
+  try {
     setCallStatus(CallStatus.CONNECTING);
 
-  //  If interview type is "generate"
-  // start workflow that generates questions
+    // 🇮🇳 HINDI MODE: Use browser-based pipeline (NO Vapi)
+    if (language === "hi" && type !== "generate") {
+      console.log("🇮🇳 Starting Hindi Interview");
+
+      // ✅ Reset flags
+      stopRef.current = false;
+      feedbackGeneratedRef.current = false;
+
+      setMessages([]);
+      setCallStatus(CallStatus.ACTIVE);
+
+      // ✅ Greeting FIRST - start TTS immediately
+      setInterviewStage('greeting');
+      await speakHindi("नमस्ते! आज मुझसे बात करने के लिए समय निकालने हेतु आपका धन्यवाद। मैं आपके बारे में और आपके अनुभव के बारे में अधिक जानने के लिए उत्साहित हूँ। क्या आप तैयार हैं? ");
+
+      // ✅ Listen for greeting response
+      setInterviewStage('waitingGreetingReply');
+      const greetingResponse = await listenForAnswer();
+      
+      if (greetingResponse) {
+        // ✅ Simple natural response to greeting
+        setInterviewStage('startInterview');
+        await speakHindi("बहुत बढ़िया, चलिए शुरू करते हैं।");
+      } else {
+        // If no response, still start interview
+        setInterviewStage('startInterview');
+        await speakHindi("चलिए शुरू करते हैं।");
+      }
+
+      // ✅ Start questions
+      await runQuestion(0);
+
+      return;
+    }
+
+    // 🇬🇧 ENGLISH MODE: Use Vapi
     if (type === "generate") {
+      console.log("🎯 Generate mode - starting Vapi workflow");
       await vapi.start(process.env.NEXT_PUBLIC_VAPI_WORKFLOW_ID!, {
         variableValues: {
           username: userName,
@@ -277,27 +343,327 @@ const Agent = ({
         },
       });
     } else {
-      let formattedQuestions = ""; // Convert questions array → single string because Vapi variables usually expect strings
+      let formattedQuestions = "";
+
       if (questions) {
         formattedQuestions = questions
-          .map((question: string) => `- ${question}`)
+          .map((q: string) => `- ${q}`)
           .join("\n");
       }
 
-    // Start interview workflow with my questions
-      await vapi.start(interviewer, {
-        variableValues: {
-          questions: formattedQuestions, // send questions to AI interviewer
-        },
+      console.log("🚀 Starting Vapi (English) with:", {
+        language,
+        questionsCount: questions?.length,
       });
+
+      await vapi.start(interviewer, {
+  variableValues: {
+    questions: formattedQuestions,
+    language: "English",
+  },
+
+    voice: {
+      provider: "11labs",
+      voiceId: "21m00Tcm4TlvDq8ikWAM",
+    },
+    transcriber: {
+      provider: "deepgram",
+      model: "nova-2",
+      language: "en",
+  
+  },
+});
+
     }
-  };
+  } catch (error) {
+    console.error("❌ Error starting interview:", error);
+    setCallStatus(CallStatus.INACTIVE);
+    alert(`Failed to start interview: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+};
 
   // MAIN
   // clicks "End Call" , it sets call status to finished  , USE EFFECT AUTO TRIGGERED when any dependency change
-  const handleDisconnect = () => {
+  const handleEndCall = () => {
+    console.log("🛑 Call stopped by user");
+
+    stopRef.current = true;
+
     setCallStatus(CallStatus.FINISHED);
-    vapi.stop();
+
+    // Stop Vapi for English mode
+    if (language === "en") {
+      vapi.stop();
+    }
+
+    audioRef.current?.pause();
+    audioRef.current = null;
+  };
+
+  // 🇮🇳 HINDI PIPELINE - REAL-TIME BROWSER-BASED
+
+  /**
+   * Speak Hindi text using Sarvam TTS via backend
+   */
+  const speakHindi = async (text: string): Promise<boolean> => {
+    if (stopRef.current) return false;
+
+    try {
+      console.log("🔊 TTS Request:", text);
+
+      setIsSpeaking(true);
+
+      // ✅ update transcript immediately
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: text },
+      ]);
+
+      const res = await fetch("/api/sarvam-tts", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ text }),
+      });
+
+      if (!res.ok) throw new Error("TTS failed");
+
+      const { audio } = await res.json();
+
+      const audioBytes = atob(audio);
+      const array = new Uint8Array(audioBytes.length);
+
+      for (let i = 0; i < audioBytes.length; i++) {
+        array[i] = audioBytes.charCodeAt(i);
+      }
+
+      const blob = new Blob([array], { type: "audio/wav" });
+      const url = URL.createObjectURL(blob);
+
+      const audioEl = new Audio(url);
+      audioRef.current = audioEl;
+await new Promise<void>((resolve) => {
+  audioEl.oncanplaythrough = () => resolve();
+  audioEl.load();
+});
+      console.log("▶️ Playing audio...");
+
+      await audioEl.play();
+
+      return new Promise((resolve) => {
+        audioEl.onended = () => {
+          console.log("▶️ Audio completed");
+          setIsSpeaking(false);
+          URL.revokeObjectURL(url);
+          audioRef.current = null;
+          resolve(true);
+        };
+
+        audioEl.onerror = () => {
+          console.error("❌ Audio error");
+          setIsSpeaking(false);
+          URL.revokeObjectURL(url);
+          audioRef.current = null;
+          resolve(false);
+        };
+      });
+    } catch (err) {
+      console.error("❌ speakHindi error:", err);
+      setIsSpeaking(false);
+      return false;
+    }
+  };
+
+  /**
+   * Generate short, TTS-friendly feedback only (no follow-up questions)
+   */
+  const generateShortFeedback = async (question: string, answer: string): Promise<string | null> => {
+    if (stopRef.current) return null;
+
+    try {
+      console.log("🤖 Generating short feedback for answer:", answer);
+
+      const res = await fetch("/api/generate-followup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question,
+          answer,
+          isFeedbackOnly: true, // New flag for short feedback
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        return data.text;
+      }
+    } catch (error) {
+      console.error("❌ Error generating feedback:", error);
+    }
+
+    return null;
+  };
+
+  /**
+   * Listen for user answer using Sarvam STT via backend
+   * Uses Voice Activity Detection to stop recording after 1.5s of silence (after user has spoken)
+   */
+  const listenForAnswer = async (maxSeconds = 15): Promise<string | null> => {
+    let stream: MediaStream | null = null;
+
+    try {
+      console.log("🎤 Recording started with VAD");
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      const mediaRecorder = new MediaRecorder(stream);
+      const chunks: BlobPart[] = [];
+
+      // VAD setup
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const source = audioContext.createMediaStreamSource(stream);
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 512;
+      source.connect(analyser);
+
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+      let silenceStart: number | null = null;
+      let hasSpoken = false;
+      let stopped = false;
+
+      mediaRecorder.ondataavailable = (e) => {
+        chunks.push(e.data);
+      };
+
+      mediaRecorder.start(100); // collect in 100ms chunks
+
+      const stopRecording = () => {
+        if (stopped) return;
+        stopped = true;
+        console.log("🛑 VAD triggered - stopping recording");
+        mediaRecorder.stop();
+        audioContext.close();
+        stream?.getTracks().forEach((t) => t.stop());
+      };
+
+      // Hard max timeout
+      const maxTimer = setTimeout(() => {
+        console.log("⏱️ Max recording time reached");
+        stopRecording();
+      }, maxSeconds * 1000);
+
+      // VAD loop — stop after 1.5s silence AFTER user has spoken
+      const vadInterval = setInterval(() => {
+        analyser.getByteFrequencyData(dataArray);
+        const avg = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+
+        if (avg > 10) {
+          // User is speaking
+          hasSpoken = true;
+          silenceStart = null;
+        } else if (hasSpoken) {
+          // User was speaking, now silent
+          if (!silenceStart) silenceStart = Date.now();
+          if (Date.now() - silenceStart > 1500) {
+            // 1.5s of silence = done
+            console.log("🤐 1.5s of silence detected - stopping");
+            clearInterval(vadInterval);
+            clearTimeout(maxTimer);
+            stopRecording();
+          }
+        }
+      }, 100);
+
+      return new Promise((resolve) => {
+        mediaRecorder.onstop = async () => {
+          clearInterval(vadInterval);
+          clearTimeout(maxTimer);
+          console.log("🛑 Recording stopped");
+
+          const blob = new Blob(chunks, { type: "audio/webm" });
+          const formData = new FormData();
+          formData.append("file", blob, "audio.webm");
+
+          const res = await fetch("/api/sarvam-stt", {
+            method: "POST",
+            body: formData,
+          });
+
+          const data = await res.json();
+          const transcript = data.transcript || "";
+
+          console.log("🧠 User transcript:", transcript);
+
+          setMessages((prev) => [
+            ...prev,
+            { role: "user", content: transcript },
+          ]);
+
+          resolve(transcript);
+        };
+      });
+    } catch (err) {
+      console.error("❌ STT error:", err);
+      stream?.getTracks().forEach((track) => track.stop());
+      return null;
+    }
+  };
+
+  /**
+   * Start Hindi interview - real-time in browser
+   */
+  const runQuestion = async (index: number, retryCount = 0) => {
+    if (stopRef.current) return;
+
+    // Ensure we have questions
+    if (!questions || questions.length === 0) {
+      console.error("❌ Need at least 1 question, got:", questions?.length);
+      await speakHindi("क्षमा करें, सवाल तैयार नहीं हैं। कृपया पुनः प्रयास करें।");
+      setCallStatus(CallStatus.FINISHED);
+      return;
+    }
+
+    if (index >= questions.length) {
+      await speakHindi("इंटरव्यू समाप्त हुआ। धन्यवाद!");
+      setCallStatus(CallStatus.FINISHED);
+      return;
+    }
+
+    const question = questions[index];
+    setCurrentQuestionIndex(index);
+    setInterviewStage(`question${index + 1}` as any);
+
+    // Log which question is being asked
+    console.log(`\n🎯 ASKING QUESTION ${index + 1}/${questions.length}:`);
+    console.log(`   "${question}"`);
+
+    // 1️⃣ Ask main question
+    await speakHindi(question);
+
+    // 2️⃣ Listen for answer
+    const answer = await listenForAnswer();
+    if (!answer) {
+      if (retryCount >= 1) {
+        console.warn("Skipping question due to repeated mic/STT failure", index);
+        return runQuestion(index + 1);
+      }
+      return runQuestion(index, retryCount + 1);
+    }
+
+    // 3️⃣ Generate short feedback only (no follow-up question)
+    setIsProcessing(true);
+    try {
+      const feedback = await generateShortFeedback(question, answer);
+      if (feedback) {
+        await speakHindi(feedback);
+      }
+    } catch (error) {
+      console.error("Feedback generation error:", error);
+    }
+    setIsProcessing(false);
+
+    // 4️⃣ Move to next question
+    return runQuestion(index + 1);
   };
 
   return (
@@ -336,15 +702,28 @@ const Agent = ({
       {messages.length > 0 && (
         <div className="transcript-border">
           <div className="transcript">
-            <p
-              key={lastMessage}
-              className={cn(
-                "transition-opacity duration-500 opacity-0",
-                "animate-fadeIn opacity-100"
-              )}
-            >
-              {lastMessage}
-            </p>
+            {isProcessing ? (
+              <p className="text-lg text-center text-white opacity-100 animate-pulse">
+                सोच रहा हूँ...
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {messages.length > 0 && (
+                  <div
+                    className={`p-2 rounded ${
+                      messages[messages.length - 1].role === 'assistant'
+                        ? 'bg-gray-900/50 text-right ml-8'
+                        : 'bg-gray-700/50 text-left mr-8'
+                    }`}
+                  >
+                    <span className="text-sm font-medium text-gray-300">
+                      {messages[messages.length - 1].role === 'assistant' ? 'AI:' : 'You:'}
+                    </span>
+                    <p className="text-white mt-1">{messages[messages.length - 1].content}</p>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -366,7 +745,7 @@ const Agent = ({
             </span>
           </button>
         ) : (
-          <button className="btn-disconnect" onClick={() => handleDisconnect()}>
+          <button className="btn-disconnect" onClick={() => handleEndCall()}>
             End
           </button>
         )}

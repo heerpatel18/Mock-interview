@@ -23,10 +23,11 @@ import { getCurrentUser } from "@/lib/actions/auth.action";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
 import { MAX_PDF_BYTES } from "@/lib/rag/constants";
-import { COMPANY_JDS } from "@/constants";
+
 
 const formSchema = z.object({
   mode: z.enum(["standard", "resume"]),
+  language: z.enum(["en", "hi"]),
   role: z.string().min(2, {
     message: "Role must be at least 2 characters.",
   }),
@@ -40,8 +41,7 @@ const formSchema = z.object({
     message: "Tech stack must be at least 2 characters.",
   }),
   amount: z.coerce.number().min(1).max(10),
-  companyType: z.string().optional(),
-  customJD: z.string().optional(),
+  jobDescription: z.string().optional(),
 });
 
 export type InterviewFormValues = z.output<typeof formSchema>;
@@ -51,6 +51,7 @@ const InterviewGenerationPage = () => {
   const [userId, setUserId] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [resumePdf, setResumePdf] = useState<File | null>(null);
+  const [jdPdf, setJdPdf] = useState<File | null>(null);
 
   useEffect(() => {
     const fetchUser = async () => {
@@ -64,13 +65,13 @@ const InterviewGenerationPage = () => {
     resolver: zodResolver(formSchema) as Resolver<InterviewFormValues>,
     defaultValues: {
       mode: "standard",
+      language: "en",
       role: "",
       type: "technical",
       level: "junior",
       techstack: "",
       amount: 5,
-      companyType: "",
-      customJD: "",
+      jobDescription: "",
     },
   });
 
@@ -79,6 +80,25 @@ const InterviewGenerationPage = () => {
   useEffect(() => {
     if (mode === "standard") setResumePdf(null);
   }, [mode]);
+
+  // Helper function to extract text from PDF via API
+  async function extractTextFromPdf(file: File): Promise<string> {
+    const formData = new FormData();
+    formData.append("file", file);
+    
+    const response = await fetch("/api/extract-pdf", {
+      method: "POST",
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || "Failed to extract PDF text");
+    }
+
+    const data = await response.json();
+    return data.text;
+  }
 
   function handlePdfChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -101,6 +121,27 @@ const InterviewGenerationPage = () => {
     e.target.value = "";
   }
 
+  function handleJdPdfChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const lower = file.name.toLowerCase();
+    if (!lower.endsWith(".pdf")) {
+      toast.error("Please upload a PDF file (.pdf).");
+      e.target.value = "";
+      return;
+    }
+    if (file.size > MAX_PDF_BYTES) {
+      toast.error(
+        `PDF must be under ${Math.round(MAX_PDF_BYTES / (1024 * 1024))} MB.`
+      );
+      e.target.value = "";
+      return;
+    }
+    setJdPdf(file);
+    toast.success(`Job description PDF selected: ${file.name}`);
+    e.target.value = "";
+  }
+
   async function onSubmit(values: InterviewFormValues) {
     if (!userId) {
       toast.error("You must be logged in to create an interview.");
@@ -112,10 +153,22 @@ const InterviewGenerationPage = () => {
       return;
     }
 
-    const jobDescription =
-      values.customJD?.trim() ||
-      COMPANY_JDS[values.companyType?.trim() || ""] ||
-      "";
+    let jobDescription = values.jobDescription?.trim() || "";
+
+    // If JD PDF is uploaded, extract text from it
+    if (jdPdf) {
+      try {
+        const extractedJd = await extractTextFromPdf(jdPdf);
+        if (extractedJd && extractedJd.trim()) {
+          jobDescription = extractedJd.trim();
+          toast.success("Job description PDF extracted successfully.");
+        }
+      } catch (error) {
+        toast.error("Failed to extract job description from PDF.");
+        console.error("JD PDF extraction error:", error);
+        return;
+      }
+    }
 
     setIsSubmitting(true);
     try {
@@ -128,8 +181,8 @@ const InterviewGenerationPage = () => {
         fd.append("techstack", values.techstack);
         fd.append("amount", String(values.amount));
         fd.append("userid", userId);
-        fd.append("companyType", values.companyType?.trim() || "");
         fd.append("jobDescription", jobDescription);
+        fd.append("language", values.language);
         fd.append("resumePdf", resumePdf);
 
         const response = await fetch("/api/vapi/generate", {
@@ -141,7 +194,7 @@ const InterviewGenerationPage = () => {
 
         if (response.ok && result.success) {
           toast.success("Interview created successfully!");
-          router.push(`/interview/${result.interviewId}`);
+          router.push(`/interview/${result.interviewId}?lang=${values.language}`);
         } else {
           toast.error("Failed to create interview.", {
             description: result.error || "An unknown error occurred.",
@@ -160,9 +213,9 @@ const InterviewGenerationPage = () => {
             techstack: values.techstack,
             amount: values.amount,
             userid: userId,
-            companyType: values.companyType?.trim() || "",
             jobDescription,
             mode: "standard",
+            language: values.language,
           }),
         });
 
@@ -170,7 +223,7 @@ const InterviewGenerationPage = () => {
 
         if (response.ok && result.success) {
           toast.success("Interview created successfully!");
-          router.push(`/interview/${result.interviewId}`);
+          router.push(`/interview/${result.interviewId}?lang=${values.language}`);
         } else {
           toast.error("Failed to create interview.", {
             description: result.error || "An unknown error occurred.",
@@ -183,6 +236,7 @@ const InterviewGenerationPage = () => {
       });
     } finally {
       setIsSubmitting(false);
+      setJdPdf(null);
     }
   }
 
@@ -215,11 +269,47 @@ const InterviewGenerationPage = () => {
                         checked={field.value === "resume"}
                         onChange={() => field.onChange("resume")}
                       />
-                      <span>Based on your resume (PDF + RAG + Groq)</span>
+                      <span>Based on your resume (PDF + Groq)</span>
                     </label>
                   </div>
                 </FormControl>
               
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name="language"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Interview Language</FormLabel>
+                <FormControl>
+                  <div className="flex flex-col gap-3 sm:flex-row sm:gap-6">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        className="size-4 accent-primary"
+                        checked={field.value === "en"}
+                        onChange={() => field.onChange("en")}
+                      />
+                      <span>English</span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        className="size-4 accent-primary"
+                        checked={field.value === "hi"}
+                        onChange={() => field.onChange("hi")}
+                      />
+                      <span>हिन्दी (Hindi)</span>
+                    </label>
+                  </div>
+                </FormControl>
+                <FormDescription>
+                  Select the language for this interview.
+                </FormDescription>
                 <FormMessage />
               </FormItem>
             )}
@@ -337,47 +427,42 @@ const InterviewGenerationPage = () => {
 
           <FormField
             control={form.control}
-            name="companyType"
+            name="jobDescription"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Company Profile (for Cultural & Role Fit)</FormLabel>
+                <FormLabel>Job Description (optional)</FormLabel>
                 <FormControl>
-                  <select
-                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                    value={field.value || ""}
-                    onChange={field.onChange}
-                  >
-                    <option value="">Select company profile (optional)</option>
-                    <option value="google">Google-style</option>
-                    <option value="startup">Startup-style</option>
-                    <option value="corporate">Corporate-style</option>
-                  </select>
+                  <div className="space-y-3">
+                    <textarea
+                      className="w-full min-h-32 rounded-md border border-input bg-background px-3 py-2 text-sm"
+                      placeholder="Paste the job description here."
+                      {...field}
+                    />
+                    <div className="flex flex-col gap-2">
+                      <p className="text-sm text-muted-foreground">OR</p>
+                      <div className="flex items-center gap-2">
+                        <label className="flex-1">
+                          <div className="cursor-pointer rounded-md border border-input bg-background px-3 py-2 text-sm hover:bg-accent">
+                            Upload Job Description PDF
+                          </div>
+                          <Input
+                            type="file"
+                            accept="application/pdf,.pdf"
+                            className="hidden"
+                            onChange={handleJdPdfChange}
+                          />
+                        </label>
+                      </div>
+                      {jdPdf && (
+                        <p className="text-sm text-green-600">
+                          ✓ PDF selected: {jdPdf.name}
+                        </p>
+                      )}
+                    </div>
+                  </div>
                 </FormControl>
                 <FormDescription>
-                  Use a predefined company culture profile, or provide a custom
-                  job description below.
-                </FormDescription>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-
-          <FormField
-            control={form.control}
-            name="customJD"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Custom Job Description (optional)</FormLabel>
-                <FormControl>
-                  <textarea
-                    className="w-full min-h-32 rounded-md border border-input bg-background px-3 py-2 text-sm"
-                    placeholder="Paste the job description here. If provided, this overrides the company profile."
-                    {...field}
-                  />
-                </FormControl>
-                <FormDescription>
-                  This will be used to evaluate &quot;Cultural &amp; Role
-                  Fit&quot; using the final transcript.
+                  Paste job description text, upload a PDF, or leave empty to proceed.
                 </FormDescription>
                 <FormMessage />
               </FormItem>

@@ -35,7 +35,6 @@ export interface Interview {
   coverImage?: string;
   /** standard = generic questions; resume = generated from RAG + resume context */
   interviewMode?: InterviewMode;
-  companyType?: string;
   jobDescription?: string;
 }
 
@@ -64,6 +63,7 @@ export interface AgentProps {
   feedbackId?: string;
   type: string;
   questions?: string[];
+  language?: "en" | "hi";
 }
 
 export interface InterviewCardProps {
@@ -79,6 +79,7 @@ export interface InterviewCardProps {
   interviewMode?: InterviewMode;
   companyType?: string;
   jobDescription?: string;
+  language?: "en" | "hi";
 }
 
 export interface RouteParams {

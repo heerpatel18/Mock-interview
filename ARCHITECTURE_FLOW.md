@@ -10,6 +10,7 @@ This section reflects the latest implementation and should be treated as the pri
 
 ### What changed
 
+#### Job Description & Cultural Fit (Previous Update)
 - Interview generation now accepts **job description context** for downstream feedback:
   - user can select a predefined company profile (`google`, `startup`, `corporate`)
   - or paste a custom job description
@@ -17,6 +18,17 @@ This section reflects the latest implementation and should be treated as the pri
 - `jobDescription` and `companyType` are persisted in interview documents.
 - Feedback generation now reads interview-level `jobDescription` and applies it specifically to **Cultural & Role Fit** scoring.
 - Resume extraction pipeline now uses a **Python FastAPI microservice** (`pdf_server.py`) with `pypdf`, called from Node via `extract-pdf-text.ts`.
+
+#### Multilingual Support (Latest Update - 2026)
+- Interview generation form now includes a **language toggle**: English (en) / हिन्दी (hi)
+- `language` parameter flows end-to-end through the system:
+  - Stored in interview documents for later retrieval
+  - Injected into Deepgram transcriber (set to "multi" for automatic language detection)
+  - Passed to LLM prompts for multilingual question generation
+  - Used in feedback generation to produce multilingual responses while keeping technical terms in English
+- Vapi system prompt now includes `{{language}}` placeholder, injected at runtime with value "Hindi" or "English"
+- LLM fallback for unsupported techs now generates questions in the selected language
+- Feedback scoring and comments are generated in the selected language (Hindi uses Devanagari script)
 
 ---
 
@@ -2472,5 +2484,1386 @@ STANDARD MODE              RESUME MODE
 | **Total time** | **3-10 sec** | **5-15 sec** | Resume adds ~2-5 sec overhead |
 | **Firestore write** | <500 ms | <500 ms | Both use same write operation |
 | **Network bandwidth** | Minimal | 1-5 MB | Resume: PDF file upload |
+
+
+
+
+
+IMPORTANT BY HEER
+
+
+# 🇮🇳 HINDI INTERVIEW PIPELINE - COMPLETE FLOW
+
+## Overview
+
+The Hindi interview pipeline enables real-time voice interviews in Hindi. It uses:
+- **Sarvam.ai STT (Speech-to-Text)**: Transcribe user's Hindi voice answers
+- **Sarvam.ai TTS (Text-to-Speech)**: Speak interview questions in Hindi voice
+- **MediaRecorder API**: Capture 5-second audio clips in WebM format
+- **OpenRouter LLM**: Generate follow-up questions in Hindi with English technical terms
+- **Browser-based execution**: No backend Python processes required
+
+The pipeline is **browser-native** and orchestrated entirely in React/TypeScript.
+
+---
+
+## Hindi Pipeline Entry Point
+
+### Step 1: User Selects Hindi Language
+
+**File:** `app/(root)/interview/page.tsx`
+
+**What happens:**
+1. User arrives at `/interview` page (interview generation form)
+2. Form includes interview parameters: role, type, level, techstack, amount
+3. **New Field: Language Toggle** (added for Hindi support)
+   - Options: "English" (en) / "हिन्दी" (hi)
+   - Default: English (en)
+4. User selects "हिन्दी" (Hindi) from dropdown/radio button
+5. User fills other form fields and clicks "Generate Interview"
+6. Form is submitted with `language: "hi"`
+
+**Input to form:**
+```typescript
+{
+  role: "Frontend Engineer",
+  type: "technical",
+  level: "mid-level",
+  techstack: "React, TypeScript, Tailwind",
+  amount: 5,
+  language: "hi"  // ← NEW: Hindi selected
+}
+```
+
+**Output:**
+- Standard interview generation API call (same as English mode)
+- Language parameter is stored in Firestore interview document
+
+---
+
+## Step 2: Language Parameter Flows Through System
+
+### Location: `app/api/vapi/generate/route.ts`
+
+**Function:** `POST(request: Request)`
+
+**Input:**
+```typescript
+{
+  role: "Frontend Engineer",
+  type: "technical",
+  level: "mid-level",
+  techstack: "React, TypeScript, Tailwind",
+  amount: 5,
+  userid: "firebase-uid",
+  mode: "standard",
+  language: "hi"  // ← Captured from form
+}
+```
+
+**Processing:**
+- Extract `language` parameter from request body
+- Validate: `language === "hi" || language === "en"`
+- Pass to Groq prompt builder
+
+**Output stored in Firestore:**
+```typescript
+{
+  interviewId: "doc-abc123",
+  questions: [...],
+  role: "Frontend Engineer",
+  type: "technical",
+  level: "mid-level",
+  techstack: [...],
+  userId: "firebase-uid",
+  language: "hi",  // ← Stored for later retrieval
+  createdAt: "2026-04-17T10:30:00Z"
+}
+```
+
+---
+
+## Step 3: User Navigates to Interview Page
+
+### Location: `app/(root)/interview/[id]/page.tsx`
+
+**URL:** `/interview/abc123?lang=hi`
+
+**What happens:**
+1. Next.js reads dynamic route parameter: `[id]` → "abc123"
+2. Reads query parameter: `?lang=hi` (or defaults to "en")
+3. Passes language to Agent component via prop:
+   ```typescript
+   <Agent
+     interviewId="abc123"
+     language={lang || "en"}  // ← Hindi flag passed
+   />
+   ```
+
+**Input:**
+```typescript
+- interviewId: "abc123"
+- language: "hi"
+```
+
+**Output:**
+- Renders Agent component with Hindi mode enabled
+
+---
+
+## Step 4: Agent Component Initialization (Hindi Mode)
+
+### File: `components/Agent.tsx`
+
+**Component:** `export default function Agent({ interviewId, language })`
+
+**Props received:**
+```typescript
+{
+  interviewId: "abc123",
+  language: "hi"  // ← Hindi mode indicator
+}
+```
+
+**Initialization (useEffect):**
+
+1. **Fetch interview document from Firestore**
+   - Query: `db.collection("interviews").doc(interviewId)`
+   - Returns:
+     ```typescript
+     {
+       role: "Frontend Engineer",
+       questions: [
+         "React में virtual DOM क्या है?",
+         "Component re-rendering को कैसे optimize करते हैं?",
+         ...
+       ],
+       type: "technical",
+       language: "hi"
+     }
+     ```
+
+2. **Validate language matches**
+   - If stored `language === "hi"` and prop `language === "hi"` → Continue
+   - Otherwise → Show error, fallback to English
+
+3. **Set component state**
+   ```typescript
+   const [currentQuestion, setCurrentQuestion] = useState(0);
+   const [isRecording, setIsRecording] = useState(false);
+   const [transcript, setTranscript] = useState([]);
+   const [callStatus, setCallStatus] = useState("IDLE");
+   const [language] = useState(language);  // ← Hindi flag stored
+   ```
+
+**Output:**
+- Component ready for Hindi interview flow
+
+---
+
+## Step 5: User Clicks "Call" Button - Hindi Interview Begins
+
+### Location: `components/Agent.tsx`
+
+**Function:** `const handleCall = async () => { ... }`
+
+**Trigger:**
+- User sees interview page with questions
+- User clicks "Call" button to start voice interview
+- Callback: `handleCall()`
+
+**Input:**
+- `language === "hi"` (component state)
+- `interviewId`, `questions`, `currentQuestion`
+
+**Processing Logic:**
+```typescript
+const handleCall = async () => {
+  setCallStatus("SPEAKING");  // Show "Interviewer speaking..."
+  
+  // Check language
+  if (language === "hi") {
+    // Route to Hindi-specific pipeline
+    await startHindiInterview();
+  } else {
+    // Route to English pipeline (Vapi)
+    await startEnglishInterview();
+  }
+}
+```
+
+**Output:**
+- `callStatus` changes to "SPEAKING"
+- Calls `startHindiInterview()` function
+
+---
+
+## Step 6: Hindi Interview Pipeline - Core Function
+
+### Location: `components/Agent.tsx`
+
+**Function:** `const startHindiInterview = async () => { ... }`
+
+**Full Function Flow:**
+
+```typescript
+const startHindiInterview = async () => {
+  try {
+    // 1. GREETING: Speak initial Hindi greeting
+    await speakHindi("नमस्ते! मैं आपका इंटरव्यू लूंगा।");
+    
+    // 2. INTERVIEW LOOP: For each question
+    for (let i = 0; i < questions.length; i++) {
+      setCurrentQuestion(i);
+      
+      // a) SPEAK QUESTION: Convert question to audio and play
+      const question = questions[i];
+      await speakHindi(question);
+      
+      // b) LISTEN: Record user's answer for 5 seconds
+      const userAnswer = await listenForAnswer();
+      
+      // c) STORE: Save to transcript
+      const message = {
+        role: "assistant",
+        content: question
+      };
+      const userMessage = {
+        role: "user",
+        content: userAnswer
+      };
+      setTranscript(prev => [...prev, message, userMessage]);
+      
+      // d) PAUSE: Give user time to relax
+      await new Promise(res => setTimeout(res, 1000));
+      
+      // e) FOLLOW-UP: Generate and ask follow-up question
+      const followUp = await generateFollowUp(question, userAnswer);
+      
+      // f) SPEAK FOLLOW-UP: Play follow-up question in Hindi
+      await speakHindi(followUp);
+      
+      // g) LISTEN FOLLOW-UP: Record user's follow-up answer
+      const followUpAnswer = await listenForAnswer();
+      
+      // h) STORE FOLLOW-UP: Save follow-up exchange
+      setTranscript(prev => [
+        ...prev,
+        { role: "assistant", content: followUp },
+        { role: "user", content: followUpAnswer }
+      ]);
+      
+      // i) PAUSE: Before next question
+      await new Promise(res => setTimeout(res, 2000));
+    }
+    
+    // 3. CLOSING: Speak thank you message
+    await speakHindi("धन्यवाद आपके समय के लिए!");
+    
+    // 4. FINISH: Mark interview as complete
+    setCallStatus("FINISHED");
+    
+    // 5. REDIRECT: useEffect triggers feedback creation and navigation
+    
+  } catch (error) {
+    console.error("Hindi interview error:", error);
+    setCallStatus("ERROR");
+  }
+}
+```
+
+**State Variables Used:**
+- `currentQuestion`: Track which question user is on
+- `transcript`: Store all Q&A exchanges
+- `callStatus`: Show UI feedback ("SPEAKING", "LISTENING", "FINISHED")
+- `language`: Confirm Hindi mode
+
+**Output:**
+- Transcript populated with Hindi questions and user answers
+- Interview status marked as "FINISHED"
+
+---
+
+## Step 7a: Speaking Hindi - TTS Pipeline
+
+### Function: `const speakHindi = async (text: string) => { ... }`
+
+**Location:** `components/Agent.tsx`
+
+**Input:**
+```typescript
+text: "React में virtual DOM क्या है?"  // Hindi question
+```
+
+**Processing Steps:**
+
+#### 7a.1: Call Sarvam TTS API
+
+**HTTP Request:**
+```
+POST /api/sarvam-tts
+Content-Type: application/json
+
+{
+  "text": "React में virtual DOM क्या है?",
+  "language": "hi"
+}
+```
+
+#### 7a.2: Backend Handler
+
+**File:** `app/api/sarvam-tts/route.ts`
+
+**Function:** `export async function POST(request: Request)`
+
+**Input received:**
+```typescript
+{
+  text: "React में virtual DOM क्या है?",
+  language: "hi"
+}
+```
+
+**Processing:**
+1. Parse request JSON
+2. Validate: `text` non-empty, `language === "hi"`
+3. Build Sarvam.ai API request:
+   ```typescript
+   const sarvamRequest = {
+     inputs: [{ text: "React में virtual DOM क्या है?" }],
+     target_config: {
+       language: "hi-IN",          // ← Hindi India
+       gender: "Female",
+       model: "bulbul:v3"          // ← Latest Sarvam TTS model
+     },
+     config: {
+       pace: 1.0,                  // Normal speed
+       spl_tokens_behavior: "play"
+     }
+   };
+   ```
+
+4. Send to Sarvam.ai Cloud API:
+   ```
+   Endpoint: https://api.sarvam.ai/text-to-speech
+   Method: POST
+   Headers: {
+     "Authorization": "Bearer $SARVAM_API_KEY",
+     "Content-Type": "application/json"
+   }
+   Body: sarvamRequest
+   ```
+
+5. **Sarvam Processing:**
+   - Model: `bulbul:v3` (latest stable TTS model)
+   - Language: `hi-IN` (Indian Hindi with Devanagari script)
+   - Gender: Female voice (`priya` speaker)
+   - Pace: 1.0x speed (normal)
+   - Output: WAV audio file (base64 encoded)
+
+6. **Response from Sarvam:**
+   ```json
+   {
+     "status": "success",
+     "audios": [
+       {
+         "audioContent": "UklGRiYAAABXQVZFZm10IBAAAA...",  // Base64 WAV
+         "audioDuration": 3.2,
+         "audioLengthInSamples": 102400
+       }
+     ],
+     "inferenceId": "abc123xyz"
+   }
+   ```
+
+7. **Backend Response to Frontend:**
+   ```json
+   {
+     "success": true,
+     "audioBase64": "UklGRiYAAABXQVZFZm10IBAAAA...",
+     "duration": 3.2
+   }
+   ```
+
+**Output:** Base64-encoded WAV audio (3-4 seconds)
+
+#### 7a.3: Frontend Audio Playback
+
+Back in `speakHindi()`:
+
+**Code:**
+```typescript
+const speakHindi = async (text: string) => {
+  try {
+    // 1. Call backend API
+    const response = await fetch("/api/sarvam-tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, language: "hi" })
+    });
+    
+    const { audioBase64 } = await response.json();
+    
+    // 2. Decode base64 to binary
+    const binaryString = atob(audioBase64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    
+    // 3. Create WAV blob
+    const blob = new Blob([bytes], { type: "audio/wav" });
+    
+    // 4. Create object URL
+    const audioUrl = URL.createObjectURL(blob);
+    
+    // 5. Create audio element and play
+    const audio = new Audio(audioUrl);
+    audio.playbackRate = 1.0;  // Normal speed
+    
+    // Wait for audio to finish playing
+    await new Promise((resolve) => {
+      audio.onended = resolve;
+      audio.play();
+    });
+    
+    // 6. Cleanup
+    URL.revokeObjectURL(audioUrl);
+    
+  } catch (error) {
+    console.error("TTS Error:", error);
+    // Fallback: Show text on screen if audio fails
+  }
+}
+```
+
+**Input to `speakHindi()`:**
+- Hindi text (Devanagari script)
+
+**Output:**
+- Audio plays through speaker at normal speed
+- Function waits until audio finishes before returning
+- Function resolves promise when audio ends
+
+**Sarvam TTS Configuration Summary:**
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| Model | `bulbul:v3` | Latest, most stable TTS |
+| Language | `hi-IN` | Indian Hindi |
+| Speaker | Female (`priya`) | Natural Hindi female voice |
+| Gender | Female | Consistent voice |
+| Pace | 1.0 | Normal speaking speed |
+
+---
+
+## Step 7b: Listening for Hindi Answer - STT Pipeline
+
+### Function: `const listenForAnswer = async () => { ... }`
+
+**Location:** `components/Agent.tsx`
+
+**Purpose:** Record 5 seconds of user's Hindi voice, convert to text using STT
+
+**Processing Steps:**
+
+#### 7b.1: Get Microphone Access
+
+```typescript
+const listenForAnswer = async () => {
+  try {
+    // 1. Request microphone permission from OS
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
+    });
+    
+    setIsRecording(true);  // Update UI: "Listening..."
+    
+    // 2. Create MediaRecorder instance
+    const mediaRecorder = new MediaRecorder(stream, {
+      mimeType: "audio/webm"  // WebM format (browser standard)
+    });
+    
+    const chunks: BlobPart[] = [];
+    
+    // 3. Collect audio chunks as they become available
+    mediaRecorder.ondataavailable = (event) => {
+      chunks.push(event.data);
+    };
+    
+    // 4. Start recording
+    mediaRecorder.start();
+    
+    // 5. WAIT 5 SECONDS
+    //    User speaks their answer during this time
+    await new Promise((resolve) => {
+      setTimeout(resolve, 5000);  // Fixed 5-second window
+    });
+    
+    // 6. Stop recording
+    mediaRecorder.stop();
+    
+    // 7. Wait for stop to complete (ondataavailable fires)
+    await new Promise((resolve) => {
+      mediaRecorder.onstop = resolve;
+    });
+    
+    setIsRecording(false);  // Update UI: Stop showing "Listening..."
+    
+    // 8. Create WebM blob from chunks
+    const blob = new Blob(chunks, { type: "audio/webm" });
+    
+    // 9. Stop all audio tracks
+    stream.getTracks().forEach(track => track.stop());
+```
+
+#### 7b.2: Send WebM Audio to Backend
+
+```typescript
+    // 10. Create FormData with audio blob
+    const formData = new FormData();
+    formData.append("file", blob, "answer.webm");
+    
+    // 11. Call backend STT API
+    const response = await fetch("/api/sarvam-stt", {
+      method: "POST",
+      body: formData  // Send as multipart form data
+    });
+```
+
+**HTTP Request to Backend:**
+```
+POST /api/sarvam-stt
+Content-Type: multipart/form-data
+
+[Binary WebM audio data]
+filename: answer.webm
+```
+
+#### 7b.3: Backend STT Processing
+
+**File:** `app/api/sarvam-stt/route.ts`
+
+**Function:** `export async function POST(request: Request)`
+
+**Input:**
+- WebM audio file from FormData
+
+**Processing:**
+
+1. **Parse FormData:**
+   ```typescript
+   const formData = await request.formData();
+   const file = formData.get("file") as File;
+   
+   if (!file) {
+     return NextResponse.json(
+       { error: "No file provided" },
+       { status: 400 }
+     );
+   }
+   ```
+
+2. **Convert File to Buffer:**
+   ```typescript
+   const arrayBuffer = await file.arrayBuffer();
+   const buffer = Buffer.from(arrayBuffer);
+   ```
+
+3. **Prepare Sarvam STT Request:**
+   ```typescript
+   const formDataForSarvam = new FormData();
+   formDataForSarvam.append("file", new Blob([buffer], { type: "audio/webm" }), "audio.webm");
+   
+   const sarvamRequest = {
+     language: "hi-IN",     // ← Hindi India
+     model: "saarika:v2.5"  // ← Latest Sarvam STT model
+   };
+   
+   // Append parameters to FormData
+   Object.entries(sarvamRequest).forEach(([key, value]) => {
+     formDataForSarvam.append(key, value);
+   });
+   ```
+
+4. **Send to Sarvam.ai STT API:**
+   ```
+   POST https://api.sarvam.ai/speech-to-text
+   Headers: {
+     "Authorization": "Bearer $SARVAM_API_KEY"
+   }
+   Body: FormData with audio file + parameters
+   ```
+
+5. **Sarvam Processing:**
+   - Model: `saarika:v2.5` (latest ASR model)
+   - Language: `hi-IN` (Indian Hindi)
+   - Input: WebM audio (5 seconds)
+   - Processes: Converts speech to Devanagari text
+   - Output: JSON with transcription
+
+6. **Response from Sarvam:**
+   ```json
+   {
+     "status": "success",
+     "transcript": "React में virtual DOM को मैं state management के लिए use करता हूं",
+     "inferenceId": "xyz789",
+     "confidence": 0.94
+   }
+   ```
+
+7. **Backend Response to Frontend:**
+   ```json
+   {
+     "success": true,
+     "transcript": "React में virtual DOM को मैं state management के लिए use करता हूं",
+     "confidence": 0.94
+   }
+   ```
+
+**Output:** Hindi transcript as Devanagari text
+
+#### 7b.4: Frontend Receipt and Error Handling
+
+Back in `listenForAnswer()`:
+
+```typescript
+    // 12. Handle STT response
+    if (!response.ok) {
+      // Retry once on failure
+      console.warn("STT failed, retrying...");
+      
+      // Recursively call listenForAnswer() again
+      return listenForAnswer();
+    }
+    
+    const { transcript, confidence } = await response.json();
+    
+    // 13. Validate transcript
+    if (!transcript || transcript.trim().length === 0) {
+      // No speech detected - retry
+      console.warn("No speech detected, retrying...");
+      return listenForAnswer();
+    }
+    
+    // 14. Return transcript to caller
+    return transcript;
+    
+  } catch (error) {
+    console.error("Listen error:", error);
+    // On error: return empty string (question skipped)
+    return "";
+  }
+}
+```
+
+**Input to `listenForAnswer()`:**
+- None (uses MediaRecorder internally)
+
+**Output:**
+- Hindi transcript string (Devanagari script)
+- Example: "React में virtual DOM को मैं state management के लिए use करता हूं"
+
+**MediaRecorder Configuration Summary:**
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| MIME type | `audio/webm` | Browser-standard container format |
+| Duration | 5 seconds | Fixed recording window |
+| Echo cancellation | true | Remove speaker audio |
+| Noise suppression | true | Remove background noise |
+| Auto gain control | true | Normalize volume |
+| Frequency | 48 kHz | Standard sample rate |
+
+**Recording Timeline:**
+```
+T=0s  ← Start recording (show "Listening...")
+T=0-5s ← User speaks answer
+T=5s  ← Stop recording (stop showing "Listening...")
+T=5-6s ← Send to STT API + wait for response
+T=6-7s ← Receive transcript or retry
+```
+
+---
+
+## Step 8: Generate Hindi Follow-Up Question
+
+### Function: `const generateFollowUp = async (question, userAnswer) => { ... }`
+
+**Location:** `components/Agent.tsx`
+
+**Input:**
+```typescript
+{
+  question: "React में virtual DOM क्या है?",
+  userAnswer: "React में virtual DOM को मैं state management के लिए use करता हूं"
+}
+```
+
+**Processing Steps:**
+
+#### 8.1: Build Prompt for Follow-Up
+
+**Code:**
+```typescript
+const generateFollowUp = async (question: string, answer: string) => {
+  const prompt = `
+You are an expert technical interviewer conducting an interview in Hindi.
+
+Original Question: ${question}
+
+Candidate's Answer: ${answer}
+
+Generate a follow-up question in Hindi that:
+1. Probes deeper into the candidate's understanding
+2. Keeps technical terms in English (e.g., React, virtual DOM, state management)
+3. Uses simple, clear Hindi sentences
+4. Is a single follow-up question (not multiple questions)
+5. Relates directly to what they just answered
+
+Respond with ONLY the follow-up question in Hindi, nothing else.
+  `;
+```
+
+#### 8.2: Call OpenRouter LLM API
+
+```typescript
+  const response = await fetch("/api/generate-followup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      question,
+      answer,
+      language: "hi"
+    })
+  });
+```
+
+**HTTP Request:**
+```
+POST /api/generate-followup
+Content-Type: application/json
+
+{
+  "question": "React में virtual DOM क्या है?",
+  "answer": "React में virtual DOM को मैं state management के लिए use करता हूं",
+  "language": "hi"
+}
+```
+
+#### 8.3: Backend API Handler
+
+**File:** `app/api/generate-followup/route.ts`
+
+**Function:** `export async function POST(request: Request)`
+
+**Input:**
+```typescript
+{
+  question: string,
+  answer: string,
+  language: string
+}
+```
+
+**Processing:**
+
+1. **Parse request:**
+   ```typescript
+   const { question, answer, language } = await request.json();
+   ```
+
+2. **Build LLM prompt with language support:**
+   ```typescript
+   let systemPrompt = "";
+   
+   if (language === "hi") {
+     systemPrompt = `
+You are an expert technical interviewer conducting interviews in Hindi.
+Rules:
+- Always respond in Hindi (Devanagari script)
+- Keep technical terms in English (React, DOM, state, etc.)
+- Ask probing follow-up questions
+- One question only
+- Simple, clear Hindi sentences
+- Build on candidate's previous answer
+     `;
+   } else {
+     systemPrompt = `
+You are an expert technical interviewer.
+Rules:
+- Ask probing follow-up questions in English
+- One question only
+- Build on candidate's previous answer
+     `;
+   }
+   ```
+
+3. **Call OpenRouter API:**
+   ```typescript
+   const response = await fetch("https://openrouter.io/api/v1/chat/completions", {
+     method: "POST",
+     headers: {
+       "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+       "Content-Type": "application/json"
+     },
+     body: JSON.stringify({
+       model: "openai/gpt-4o-mini",
+       messages: [
+         {
+           role: "system",
+           content: systemPrompt
+         },
+         {
+           role: "user",
+           content: `
+Previous Question: ${question}
+
+Candidate Answer: ${answer}
+
+Generate a follow-up question.
+           `
+         }
+       ],
+       temperature: 0.7,
+       max_tokens: 200
+     })
+   });
+   ```
+
+4. **OpenRouter Processing:**
+   - Model: `openai/gpt-4o-mini`
+   - Language: Hindi or English based on parameter
+   - Max tokens: 200 (limits response length)
+   - Temperature: 0.7 (balanced creativity)
+
+5. **Response from OpenRouter:**
+   ```json
+   {
+     "choices": [
+       {
+         "message": {
+           "content": "आपने कहा कि आप virtual DOM को state management के लिए use करते हो, क्या आप बता सकते हो कि React यह काम कैसे करता है? क्या आप reconciliation algorithm के बारे में जानते हो?"
+         }
+       }
+     ],
+     "usage": {
+       "prompt_tokens": 150,
+       "completion_tokens": 85
+     }
+   }
+   ```
+
+6. **Backend Response to Frontend:**
+   ```json
+   {
+     "success": true,
+     "followUp": "आपने कहा कि आप virtual DOM को state management के लिए use करते हो, क्या आप बता सकते हो कि React यह काम कैसे करता है?"
+   }
+   ```
+
+**Output:** Hindi follow-up question
+
+#### 8.4: Frontend Receipt
+
+Back in `generateFollowUp()`:
+
+```typescript
+  const { followUp } = await response.json();
+  
+  return followUp;
+  // ↓ Returned to startHindiInterview()
+  // Used in: await speakHindi(followUp);
+}
+```
+
+**Input to `generateFollowUp()`:**
+- Original question (Hindi)
+- Candidate's answer (Hindi)
+- Language flag ("hi")
+
+**Output:**
+- Follow-up question (Hindi with English technical terms)
+- Example: "आपने कहा कि आप virtual DOM को state management के लिए use करते हो, क्या आप बता सकते हो कि React यह काम कैसे करता है?"
+
+---
+
+## Complete Hindi Interview Sequence Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        HINDI INTERVIEW FLOW                                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+USER CLICKS "CALL"
+        ↓
+   language === "hi"?
+        ├─ Yes → startHindiInterview()
+        └─ No → startEnglishInterview() [Vapi]
+
+
+═══════════════════════════════════════════════════════════════════════════════
+           START HINDI INTERVIEW - MAIN LOOP
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────┐
+│ speakHindi(greeting)│
+│  "नमस्ते!..."       │
+└──────────┬──────────┘
+           ↓
+    ╔═════════════╗
+    ║ FOR i=0..N  ║
+    ║ (Each Q)    ║
+    ╚════┬════════╝
+         ↓
+    ┌─────────────────────────────────────────┐
+    │ 1. QUESTION PHASE                       │
+    │    ─────────────────                   │
+    │ a) Get question[i] from Firestore       │
+    │    "React में virtual DOM क्या है?"    │
+    │                                         │
+    │ b) Call speakHindi(question)            │
+    │    │                                    │
+    │    ├─→ POST /api/sarvam-tts             │
+    │    │   ├─ Input: Hindi text             │
+    │    │   ├─ Sarvam processing: TTS model │
+    │    │   ├─ Output: Base64 WAV audio      │
+    │    │   ├─ Frontend: Play audio (3s)     │
+    │    │   └─ Wait until audio finishes     │
+    │    │                                    │
+    │    └─→ Promise resolves when done       │
+    │                                         │
+    │ c) Call listenForAnswer()               │
+    │    │                                    │
+    │    ├─→ navigator.mediaDevices           │
+    │    │   .getUserMedia(audio config)      │
+    │    │   Request microphone permission    │
+    │    │                                    │
+    │    ├─→ new MediaRecorder(stream)        │
+    │    │   ├─ MIME: audio/webm              │
+    │    │   ├─ Start recording               │
+    │    │   ├─ Show UI: "Listening..."       │
+    │    │   ├─ Wait 5 seconds                │
+    │    │   ├─ User speaks answer (captured) │
+    │    │   ├─ Stop recording at T=5s        │
+    │    │   ├─ Stop microphone stream        │
+    │    │   └─ Create Blob from chunks       │
+    │    │                                    │
+    │    ├─→ FormData append audio blob       │
+    │    │                                    │
+    │    ├─→ POST /api/sarvam-stt             │
+    │    │   ├─ Input: WebM audio (5s)        │
+    │    │   ├─ Sarvam processing: STT model  │
+    │    │   │  - Language: hi-IN             │
+    │    │   │  - Model: saarika:v2.5         │
+    │    │   │  - Converts speech → text      │
+    │    │   ├─ Output: Hindi transcript      │
+    │    │   └─ Return transcript string      │
+    │    │                                    │
+    │    ├─→ If error: Retry once             │
+    │    │   If retry fails: Return ""        │
+    │    │                                    │
+    │    └─→ Return userAnswer (Hindi text)   │
+    │                                         │
+    │ d) Store in transcript:                 │
+    │    [{                                   │
+    │      role: "assistant",                 │
+    │      content: question                  │
+    │    }, {                                 │
+    │      role: "user",                      │
+    │      content: userAnswer                │
+    │    }]                                   │
+    │                                         │
+    │ e) Wait 1 second (pause)                │
+    └─────────────────────────────────────────┘
+         ↓
+    ┌─────────────────────────────────────────┐
+    │ 2. FOLLOW-UP PHASE                      │
+    │    ──────────────────                   │
+    │ a) Call generateFollowUp(question,      │
+    │                         userAnswer)     │
+    │    │                                    │
+    │    ├─→ POST /api/generate-followup      │
+    │    │   ├─ Input: question, answer       │
+    │    │   ├─ Language: "hi"                │
+    │    │   ├─ OpenRouter processing:        │
+    │    │   │  - Model: openai/gpt-4o-mini   │
+    │    │   │  - System prompt (Hindi)       │
+    │    │   │  - Max tokens: 200             │
+    │    │   │  - Temperature: 0.7            │
+    │    │   │  - Generates follow-up (Hindi) │
+    │    │   └─ Return follow-up text         │
+    │    │                                    │
+    │    └─→ Return followUp string           │
+    │                                         │
+    │ b) Call speakHindi(followUp)            │
+    │    (Same as step 1b - TTS)              │
+    │    Play follow-up audio (2-4s)          │
+    │                                         │
+    │ c) Call listenForAnswer()               │
+    │    (Same as step 1c - STT)              │
+    │    Record 5 second follow-up answer     │
+    │                                         │
+    │ d) Store in transcript:                 │
+    │    [{                                   │
+    │      role: "assistant",                 │
+    │      content: followUp                  │
+    │    }, {                                 │
+    │      role: "user",                      │
+    │      content: followUpAnswer            │
+    │    }]                                   │
+    │                                         │
+    │ e) Wait 2 seconds (pause before next Q) │
+    └─────────────────────────────────────────┘
+         ↓
+    ┌────────────────────────────────────────┐
+    │ LOOP CONTINUES TO NEXT QUESTION        │
+    │ (Questions 1, 2, 3, 4, 5...)           │
+    └────────────────────────────────────────┘
+         ↓
+    ┌────────────────────────────────────────┐
+    │ LOOP ENDS - ALL QUESTIONS DONE         │
+    │ (i >= questions.length)                │
+    └────────────────────────────────────────┘
+         ↓
+    ┌──────────────────────┐
+    │ speakHindi(closing)  │
+    │  "धन्यवाद!"            │
+    └─────────┬────────────┘
+              ↓
+    ┌──────────────────────────────────┐
+    │ setCallStatus("FINISHED")        │
+    │ Interview complete!              │
+    └──────────────────────────────────┘
+              ↓
+    ┌──────────────────────────────────────────┐
+    │ useEffect detects FINISHED status        │
+    │ Calls: createFeedback(transcript)        │
+    │ Calls: createSession(transcript)         │
+    │ Navigates: /interview/[id]/feedback      │
+    └──────────────────────────────────────────┘
+```
+
+---
+
+## Hindi Interview Data Structures
+
+### Transcript Format (Stored During Interview)
+
+```typescript
+// As interview progresses, this array grows:
+const transcript = [
+  // Question 1
+  {
+    role: "assistant",
+    content: "React में virtual DOM क्या है?"
+  },
+  {
+    role: "user",
+    content: "React में virtual DOM को मैं state management के लिए use करता हूं"
+  },
+  // Follow-up 1
+  {
+    role: "assistant",
+    content: "आपने कहा कि आप virtual DOM को state management के लिए use करते हो, क्या आप बता सकते हो कि React यह काम कैसे करता है?"
+  },
+  {
+    role: "user",
+    content: "React एक virtual representation बनाता है original DOM का, फिर comparison करता है..."
+  },
+  // Question 2
+  {
+    role: "assistant",
+    content: "React में hooks को क्यों use करते हैं?"
+  },
+  {
+    role: "user",
+    content: "Hooks का use करके हम state और side effects को functional components में manage कर सकते हैं"
+  },
+  // ... continues for all questions + follow-ups
+]
+```
+
+### Firestore Interview Document (With Hindi Metadata)
+
+```typescript
+{
+  // Basic fields
+  interviewId: "doc-abc123",
+  userId: "firebase-uid",
+  createdAt: "2026-04-17T10:30:00Z",
+  
+  // Interview parameters
+  role: "Frontend Engineer",
+  type: "technical",
+  level: "mid-level",
+  techstack: ["React", "TypeScript", "Tailwind"],
+  
+  // ← NEW: Language field
+  language: "hi",  // ← Indicates Hindi interview
+  
+  // Questions (in Hindi)
+  questions: [
+    "React में virtual DOM क्या है?",
+    "React में hooks को क्यों use करते हैं?",
+    "useState hook कैसे काम करता है?",
+    "useEffect hook का purpose क्या है?",
+    "React में performance optimize कैसे करते हैं?"
+  ],
+  
+  // Interview mode
+  interviewMode: "standard",
+  
+  // Status
+  finalized: true,
+  
+  // Cover image
+  coverImage: "https://..."
+}
+```
+
+---
+
+## Hindi API Call Sequence with File Sources
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    FILE-BY-FILE FUNCTION CALL SEQUENCE                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+1. USER INITIATES
+   ↓
+   File: app/(root)/interview/[id]/page.tsx
+   Component: Page component
+   Event: Component renders with language="hi" prop
+   
+2. COMPONENT MOUNT
+   ↓
+   File: components/Agent.tsx
+   Function: useEffect hook
+   Action: Fetches interview doc from Firestore
+   Output: questions[], language flag set
+   
+3. USER CLICKS CALL
+   ↓
+   File: components/Agent.tsx
+   Function: handleCall()
+   Logic: Checks language === "hi"
+   → Routes to startHindiInterview()
+   
+4. GREETING SPOKEN
+   ↓
+   File: components/Agent.tsx
+   Function: speakHindi("नमस्ते!...")
+   │
+   ├─→ Calls: fetch("/api/sarvam-tts")
+   │   ↓
+   │   File: app/api/sarvam-tts/route.ts
+   │   Function: POST(request)
+   │   Input: { text: "नमस्ते!...", language: "hi" }
+   │   Processing: Calls Sarvam.ai API (bulbul:v3 model, hi-IN)
+   │   Output: { audioBase64, duration }
+   │
+   └─→ Frontend: Plays audio via Audio() element
+   
+5. QUESTION 1 SPOKEN (Loop iteration i=0)
+   ↓
+   File: components/Agent.tsx
+   Function: startHindiInterview() → speakHindi(question[0])
+   Same as step 4 (TTS)
+   
+6. LISTEN FOR ANSWER 1
+   ↓
+   File: components/Agent.tsx
+   Function: listenForAnswer()
+   Steps:
+   a) navigator.mediaDevices.getUserMedia()
+   b) new MediaRecorder(stream, {mimeType: "audio/webm"})
+   c) mediaRecorder.start()
+   d) Wait 5 seconds
+   e) mediaRecorder.stop()
+   f) Create Blob from chunks
+   │
+   ├─→ Calls: fetch("/api/sarvam-stt", {body: FormData})
+   │   ↓
+   │   File: app/api/sarvam-stt/route.ts
+   │   Function: POST(request)
+   │   Input: FormData with audio.webm blob
+   │   Processing: Calls Sarvam.ai API (saarika:v2.5, hi-IN)
+   │   Output: { transcript, confidence }
+   │
+   └─→ Returns: userAnswer (Hindi text)
+   
+7. STORE IN TRANSCRIPT
+   ↓
+   File: components/Agent.tsx
+   Function: startHindiInterview() → setTranscript()
+   Action: Updates React state with Q & A
+   
+8. GENERATE FOLLOW-UP
+   ↓
+   File: components/Agent.tsx
+   Function: generateFollowUp(question, userAnswer)
+   │
+   ├─→ Calls: fetch("/api/generate-followup")
+   │   ↓
+   │   File: app/api/generate-followup/route.ts
+   │   Function: POST(request)
+   │   Input: { question, answer, language: "hi" }
+   │   Processing: Calls OpenRouter API (gpt-4o-mini, Hindi prompt)
+   │   Output: { followUp } (Hindi text with English tech terms)
+   │
+   └─→ Returns: followUp string
+   
+9. FOLLOW-UP SPOKEN
+   ↓
+   File: components/Agent.tsx
+   Function: speakHindi(followUp)
+   Same as step 4 (TTS)
+   
+10. LISTEN FOR FOLLOW-UP ANSWER
+    ↓
+    File: components/Agent.tsx
+    Function: listenForAnswer()
+    Same as step 6 (STT)
+    
+11. STORE FOLLOW-UP IN TRANSCRIPT
+    ↓
+    File: components/Agent.tsx
+    Function: startHindiInterview() → setTranscript()
+    
+12. LOOP REPEATS FOR REMAINING QUESTIONS
+    ↓
+    Steps 5-11 repeat for questions[1], [2], [3], [4]...
+    
+13. INTERVIEW COMPLETE
+    ↓
+    File: components/Agent.tsx
+    Function: startHindiInterview()
+    Action: setCallStatus("FINISHED")
+    
+14. useEffect DETECTS FINISH
+    ↓
+    File: components/Agent.tsx
+    Function: useEffect (depends on callStatus)
+    Steps:
+    a) Calls: createFeedback(transcript)
+       ↓
+       File: lib/actions/general.action.ts
+       Function: createFeedback(messages)
+       Action: Sends transcript to Groq for evaluation
+       
+    b) Calls: createSession(interviewId, transcript)
+    
+    c) Calls: router.push("/interview/[id]/feedback")
+       Navigates to: app/(root)/interview/[id]/feedback/page.tsx
+       
+15. FEEDBACK PAGE LOADS
+    ↓
+    File: app/(root)/interview/[id]/feedback/page.tsx
+    Component: Displays feedback from Firestore
+```
+
+---
+
+## Performance Metrics - Hindi Pipeline
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| **TTS (Sarvam)** | 1.5-3s | Network + API processing + audio generation |
+| **Audio playback** | 2-5s | Depends on question length |
+| **User answer (5s recording)** | 5s | Fixed window |
+| **STT (Sarvam)** | 1-3s | Network + transcription |
+| **Follow-up generation (OpenRouter)** | 1.5-3s | LLM inference + network |
+| **Per question cycle** | 15-25s | TTS + record + STT + follow-up TTS + record + STT |
+| **5 questions total** | 75-125s | ~1.5-2 minutes total interview |
+| **Full interview (with pauses)** | 90-150s | ~1.5-2.5 minutes total |
+
+---
+
+## Error Handling in Hindi Pipeline
+
+### STT Failure Recovery
+
+```typescript
+// In listenForAnswer():
+
+if (!response.ok) {
+  // First failure - Retry once
+  console.warn("STT failed, retrying...");
+  return listenForAnswer();  // ← Recursive call
+}
+
+// After retry fails:
+if (!transcript || transcript.trim().length === 0) {
+  console.warn("No speech detected after retry, skipping question");
+  return "";  // ← Skip question, continue to next
+}
+```
+
+### TTS Failure Handling
+
+```typescript
+// In speakHindi():
+
+try {
+  // ... fetch and play audio
+} catch (error) {
+  console.error("TTS Error:", error);
+  // Fallback: Show text on screen instead of audio
+  // Interview can continue with text display
+}
+```
+
+### Overall Interview Failure
+
+```typescript
+// In startHindiInterview():
+
+catch (error) {
+  console.error("Hindi interview error:", error);
+  setCallStatus("ERROR");
+  // User sees error message, can retry or go back
+}
+```
+
+---
+
+## Configuration Summary
+
+### Sarvam.ai Services Configuration
+
+**Text-to-Speech (TTS):**
+- Endpoint: `/api/sarvam-tts`
+- Model: `bulbul:v3`
+- Language: `hi-IN`
+- Speaker: Female (`priya`)
+- Output format: WAV (base64)
+
+**Speech-to-Text (STT):**
+- Endpoint: `/api/sarvam-stt`
+- Model: `saarika:v2.5`
+- Language: `hi-IN`
+- Input format: WebM audio
+- Output: Devanagari text transcript
+
+### OpenRouter LLM Configuration
+
+**Follow-up Generation:**
+- Endpoint: `https://openrouter.io/api/v1/chat/completions`
+- Model: `openai/gpt-4o-mini`
+- Temperature: 0.7
+- Max tokens: 200
+- System prompt: Hindi + English technical terms
+
+### MediaRecorder Configuration
+
+- Format: WebM (audio/webm)
+- Duration: 5 seconds (fixed)
+- Echo cancellation: true
+- Noise suppression: true
+- Auto gain control: true
 
 

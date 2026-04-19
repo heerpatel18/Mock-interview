@@ -11,7 +11,7 @@ import { groq } from "@/lib/groq";
 
 import { db } from "@/firebase/admin";
 import { feedbackSchema } from "@/constants";
-
+import { extractRoleRequirements, generateRoleFit, getCombinedTechStack } from "@/lib/parser/jdParser";
 
 import type { 
   CreateFeedbackParams, 
@@ -24,35 +24,44 @@ import type {
 
 
 export async function createFeedback(params: CreateFeedbackParams) {
-  // Extract parameters from the input object
-  const { interviewId, userId, transcript, feedbackId } = params; 
+  const { interviewId, userId, transcript, feedbackId } = params;
 
   try {
-    // Validate required parameters
     if (!interviewId || !userId || !transcript || transcript.length === 0) {
       throw new Error("Missing required parameters for feedback generation");
     }
 
-    //  transcript into readable string
+    // ✅ CLEAN TRANSCRIPT (FIXED)
     const formattedTranscript = transcript
-      .map(
-        (sentence: { role: string; content: string }) =>
-          `- ${sentence.role}: ${sentence.content}\n` 
-      )
-      .join("");
+      .map((s: { role: string; content: string }) => `${s.role}: ${s.content}`)
+      .join("\n")
+      .trim();
 
-    if (!formattedTranscript.trim()) {
-      throw new Error("No valid transcript content to analyze");
+    if (!formattedTranscript || formattedTranscript.length < 20) {
+      throw new Error("Transcript too weak to analyze");
     }
 
+    // Fetch interview data
     const interviewDoc = await db.collection("interviews").doc(interviewId).get();
     const interviewData = interviewDoc.exists ? interviewDoc.data() : null;
+
     const jobDescription =
       interviewData?.jobDescription?.trim() ||
-      "No job description provided. Evaluate based on general professional standards.";
+      "No job description provided.";
+    const language = interviewData?.language || "en";
+    console.log("📄 JD:", jobDescription.substring(0, 200));
+    console.log("🗣️ Transcript:", formattedTranscript.substring(0, 200));
+    console.log("🌐 Language:", language);
 
-    const culturalFitPrompt = `
-You are an expert hiring manager and behavioral interviewer.
+    // ✅ CLEAN MAIN PROMPT (FIXED & MULTILINGUAL)
+    const languageInstructions = language === "hi" 
+      ? "आपको पूर्ण हिंदी (देवनागरी लिपि) में उत्तर देना है। तकनीकी शब्द अंग्रेजी में रखें। कृपया किसी भी अन्य भाषा का उपयोग न करें।" 
+      : "Respond in English.";
+
+    const prompt = `
+You are an expert interviewer evaluating a candidate for a technical role.
+
+${languageInstructions}
 
 JOB DESCRIPTION:
 ${jobDescription}
@@ -60,180 +69,132 @@ ${jobDescription}
 INTERVIEW TRANSCRIPT:
 ${formattedTranscript}
 
-STEP 1: Extract company expectations from the job description:
-- Values and culture
-- Work environment expectations
-- Behavioral expectations
+Evaluate the candidate across these 5 categories. Be SPECIFIC and DETAILED - use concrete examples from the transcript. Do NOT be generic.
 
-STEP 2: Analyze candidate from transcript:
-- Communication clarity
-- Problem solving approach
-- Ownership and accountability
-- Collaboration signals
-- Growth mindset
+1. Communication Skills - How clearly did they explain concepts? Did they use proper terminology? Give specific examples from their answers.
 
-STEP 3: Compare candidate against company expectations and score Cultural & Role Fit.
+2. Technical Knowledge - What specific technologies/frameworks did they demonstrate knowledge of? What depth did they show? Give concrete examples of what they explained well vs what they struggled with.
 
-Rules:
-- Base everything strictly on the transcript
-- No generic answers, cite specific moments from transcript
-- Keep Cultural & Role Fit score aligned to the same 0-100 scale used by other categories
-- Keep it concise and evidence-based
+3. Problem-Solving - How did they approach problems? Did they think step-by-step? Give specific examples of their problem-solving process from the transcript.
+
+4. Cultural Fit - Based on BOTH transcript AND job description, how well do they align with company values (teamwork, ownership, learning mindset)? Give specific examples.
+
+5. Confidence & Clarity - How confident were their responses? Did they hesitate or speak clearly? Give specific examples.
+
+IMPORTANT RULES:
+- Use SPECIFIC examples from the transcript (quote their actual words when relevant)
+- Be honest and realistic - don't sugarcoat weaknesses
+- Cultural Fit MUST consider both transcript behavior AND job description values
+- Give detailed, actionable feedback
+- For each category, explain WHY you gave that score with transcript evidence
+
+Return STRICT JSON ONLY:
+
+{
+  "totalScore": number,
+  "categoryScores": [
+    {"name": "Communication Skills", "score": number, "comment": string},
+    {"name": "Technical Knowledge", "score": number, "comment": string},
+    {"name": "Problem-Solving", "score": number, "comment": string},
+    {"name": "Cultural Fit", "score": number, "comment": string},
+    {"name": "Confidence & Clarity", "score": number, "comment": string}
+  ],
+  "strengths": ["Specific strength with example"],
+  "areasForImprovement": ["Specific area with actionable advice"],
+  "finalAssessment": "Detailed overall assessment with specific recommendations"
+}
 `;
 
-    // Use text generation and parse the JSON 
     let object: any;
+
     try {
       const { text } = await generateText({
         model: groq("llama-3.3-70b-versatile"),
-        prompt: `You are an AI interviewer analyzing a mock interview. Your task is to evaluate the candidate based on structured categories. Be thorough and detailed in your analysis. Don't be lenient with the candidate. If there are mistakes or areas for improvement, point them out.
-
-Transcript:
-${formattedTranscript}
-
-For category "Cultural & Role Fit", you MUST use this guidance:
-${culturalFitPrompt}
-
-IMPORTANT: You MUST respond with ONLY a valid JSON object. Do not add any text before or after the JSON. Do not wrap it in markdown code blocks.
-
-Respond with this exact JSON structure:
-{
-  "totalScore": <number 0-100>,
-  "categoryScores": [
-    {"name": "Communication Skills", "score": <number 0-100>, "comment": "<string>"},
-    {"name": "Technical Knowledge", "score": <number 0-100>, "comment": "<string>"},
-    {"name": "Problem-Solving", "score": <number 0-100>, "comment": "<string>"},
-    {"name": "Cultural & Role Fit", "score": <number 0-100>, "comment": "<string>"},
-    {"name": "Confidence & Clarity", "score": <number 0-100>, "comment": "<string>"}
-  ],
-  "strengths": ["<string>", "<string>", "<string>"],
-  "areasForImprovement": ["<string>", "<string>", "<string>"],
-  "finalAssessment": "<string>"
-}`,
-        system: "You are a professional interviewer. ALWAYS respond with ONLY valid JSON, never with any additional text or formatting.",
+        prompt,
+        system:
+          "Return ONLY valid JSON. No explanations, no markdown.",
         temperature: 0.3,
-        maxTokens: 2048,
       });
 
-      //  convert string → JSON object
+      // ✅ SAFE JSON PARSE
       try {
-        // Try direct parsing first
         object = JSON.parse(text);
-      } catch (parseError: any) {
-        // If direct parsing fails, clean text first
-        console.warn("Direct JSON parse failed, attempting to extract JSON...");
-        
-        // Remove ```json or ``` markdown code blocks if present
-        let jsonText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '');
-        
-        // Try to find JSON object pattern (starting with { and ending with })
-        const jsonMatch = jsonText.match(/\{[\s\S]*\}/); 
-        
-        // if json found 
-        if (jsonMatch) {
-          try {
-            object = JSON.parse(jsonMatch[0]); // parse cleaned json
-            console.log("Successfully extracted JSON from text");
-          } catch (extractError: any) {
-            console.error("Failed to parse extracted JSON:", jsonMatch[0], extractError);
-            console.error("Original text:", text);
-            throw new Error("AI output was not valid JSON");
-          }
-        } else {
-          console.error("Failed to find JSON pattern in response:", text);
-          throw new Error("AI output was not valid JSON");
-        }
+      } catch {
+        const match = text.match(/\{[\s\S]*\}/);
+        if (!match) throw new Error("Invalid JSON from AI");
+        object = JSON.parse(match[0]);
       }
-      // Validate that object has required fields
-      const isValidFeedback = object && 
-        typeof object.totalScore === 'number' &&
-        Array.isArray(object.categoryScores) &&
-        object.categoryScores.length === 5 &&
-        Array.isArray(object.strengths) &&
-        Array.isArray(object.areasForImprovement) &&
-        typeof object.finalAssessment === 'string';
-      
-      if (!isValidFeedback) {
-        console.error("Parsed object is missing required fields:", object);
-        throw new Error("AI output JSON is missing required fields");
-      }
-    } catch (apiError: any) {
-      const errorMsg = apiError?.message || String(apiError);
-      const statusCode = apiError?.statusCode;
 
-
-
-      // If API quota is exhausted, rate limited, model not found, or JSON parsing failed, use mock feedback
+      // ✅ VALIDATION
       if (
-        statusCode === 429 || // Rate limited
-        statusCode === 404 || // Model not found
-        errorMsg.includes("quota") || // Quota exhausted
-        errorMsg.includes("not found") || // Model not found
-        errorMsg.includes("RESOURCE_EXHAUSTED") || // Quota exceeded
-        errorMsg.includes("not valid JSON") || // JSON parsing failed
-        errorMsg.includes("missing required fields") || // Invalid JSON structure
-        errorMsg.includes("JSON") // Any JSON-related error
+        !object ||
+        !Array.isArray(object.categoryScores) ||
+        object.categoryScores.length !== 5
       ) {
-        console.warn("Groq API or JSON parsing issue. Using mock feedback for development.", errorMsg);
-        // Generate mock feedback based on transcript length
-        const messageCount = transcript.length;
-        // Consider longer transcripts as higher quality and assign better scores
-        const hasQuality = formattedTranscript.length > 200;
-        const score = hasQuality ? Math.min(85 + Math.random() * 10, 95) : Math.min(70 + Math.random() * 15, 85);
-
-        // Create a mock feedback object with some variability based on transcript characteristics
-        object = {
-          totalScore: Math.round(score),
-          categoryScores: [
-            {
-              name: "Communication Skills",
-              score: Math.round(score * 0.95),
-              comment: messageCount > 5 ? "Good engagement and clarity in responses" : "Could improve engagement with more detailed answers"
-            },
-            {
-              name: "Technical Knowledge",
-              score: Math.round(score * 0.92),
-              comment: hasQuality ? "Demonstrated solid understanding of key concepts" : "Technical explanations could be more detailed"
-            },
-            {
-              name: "Problem-Solving",
-              score: Math.round(score * 0.88),
-              comment: "Showed ability to think through problems systematically"
-            },
-            {
-              name: "Cultural & Role Fit",
-              score: Math.round(score * 0.90),
-              comment: "Professional demeanor and good alignment with role requirements"
-            },
-            {
-              name: "Confidence & Clarity",
-              score: Math.round(score * 0.93),
-              comment: "Responses were clear and well-articulated"
-            }
-          ],
-          strengths: [
-            "Active participation and engagement",
-            "Clear communication style",
-            "Willingness to learn and grow"
-          ],
-          areasForImprovement: [
-            "Provide more specific examples in answers",
-            "Dive deeper into technical details when discussing complex topics",
-            "Focus on quantifiable outcomes and metrics"
-          ],
-          finalAssessment: `Overall, you demonstrated ${score > 80 ? "strong" : "solid"} performance in the mock interview. Continue to work on providing more detailed examples and concrete metrics to strengthen your responses.`
-        };
-      } else {
-        throw apiError;
+        throw new Error("Invalid feedback structure");
       }
+
+      // ===========================
+      // ROLE FIT (SEPARATE LOGIC)
+      // ===========================
+
+      console.log("🔍 Computing Role Fit...");
+
+      let roleFitResult = {
+        score: 50,
+        comment: "Unable to compute role fit.",
+      };
+
+      try {
+        const roleRequirements = await extractRoleRequirements(jobDescription);
+
+        let techStack: string[] = [];
+        const mode = interviewData?.interviewMode;
+
+        if (mode === "resume" && interviewData?.projects) {
+          techStack = getCombinedTechStack(interviewData.projects);
+        } else if (interviewData?.techstack) {
+          const ts = interviewData.techstack;
+          techStack = Array.isArray(ts)
+            ? ts
+            : ts.split(",").map((t: string) => t.trim());
+        }
+
+        console.log("💻 Tech Stack:", techStack);
+        console.log("📋 Requirements:", roleRequirements);
+
+        if (techStack.length > 0 || roleRequirements.skills?.length > 0) {
+          roleFitResult = await generateRoleFit({
+            techStack,
+            roleRequirements,
+            language,
+          });
+        }
+      } catch (e) {
+        console.warn("⚠️ Role fit failed:", e);
+      }
+
+      // ✅ INSERT ROLE FIT (AFTER Cultural Fit)
+      object.categoryScores.splice(4, 0, {
+        name: "Role Fit",
+        score: roleFitResult.score,
+        comment: roleFitResult.comment,
+      });
+
+      console.log("✅ Role Fit inserted");
+
+    } catch (error) {
+      console.error("❌ AI Error:", error);
+      throw error;
     }
 
+    // ===========================
+    // SAVE FEEDBACK
+    // ===========================
 
-
-    //Prepare Feedback Object to save in Firestore
     const feedback = {
-      interviewId: interviewId,
-      userId: userId,
+      interviewId,
+      userId,
       totalScore: object.totalScore,
       categoryScores: object.categoryScores,
       strengths: object.strengths,
@@ -242,48 +203,21 @@ Respond with this exact JSON structure:
       createdAt: new Date().toISOString(),
     };
 
+    const feedbackRef = feedbackId
+      ? db.collection("feedback").doc(feedbackId)
+      : db.collection("feedback").doc();
 
-    // Validate feedback object against schema before saving 
-    let feedbackRef; // 
-    //Save Feedback in Firestore
-    if (feedbackId) {
-      feedbackRef = db.collection("feedback").doc(feedbackId);
-    } else {
-      feedbackRef = db.collection("feedback").doc();
-    }
+    await feedbackRef.set(feedback);
 
-    // Save the feedback data to fs
-    await feedbackRef.set(feedback); 
+    console.log("✅ Feedback saved:", feedbackRef.id);
 
-    console.log("Feedback saved successfully:", {
-      feedbackId: feedbackRef.id,
-      interviewId,
-      userId,
-      totalScore: feedback.totalScore
-    });
-
-    // returns 
     return { success: true, feedbackId: feedbackRef.id };
 
-  } catch (error) {
-    console.error("Error saving feedback:", error);
-    console.error("Error details:", {
-      interviewId,
-      userId,
-      transcriptLength: transcript?.length,
-      feedbackId,
-      errorMessage: error instanceof Error ? error.message : 'Unknown error',
-      errorStack: error instanceof Error ? error.stack : undefined
-    });
-    return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+  } catch (error: any) {
+    console.error("❌ Error:", error);
+    return { success: false, error: error.message };
   }
 }
-
-
-
-
-
-
 //Fetch interview document using id . returns -> role , techstack, type, level, question , userid
 
 export async function getInterviewById(id: string): Promise<Interview | null> {
@@ -370,12 +304,6 @@ export async function getInterviewsByUserId(
     ...doc.data(),
   })) as Interview[];
 }
-
-
-
-
-
-
 
 
 

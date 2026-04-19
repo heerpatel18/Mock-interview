@@ -1,0 +1,396 @@
+/**
+ * Job Description Parser
+ * 
+ * Module: Extracts structured role requirements from job descriptions
+ * Separate from resume parser - DO NOT mix with resume.rag.ts
+ * 
+ * Functions:
+ * - extractRoleRequirements: Extract skills, tools, experience from JD using LLM
+ * - getCombinedTechStack: Merge and deduplicate tech stack from project list
+ * - generateRoleFit: Compare candidate tech stack with job requirements
+ */
+
+import { generateText } from "ai";
+import { groq } from "@/lib/groq";
+
+/**
+ * Role requirements extracted from job description
+ */
+export interface RoleRequirements {
+  skills: string[];
+  tools: string[];
+  experience: string;
+  other_requirements: string[];
+}
+
+/**
+ * Role fit evaluation result
+ */
+export interface RoleFitResult {
+  score: number;
+  matched_skills: string[];
+  missing_skills: string[];
+  comment: string;
+}
+
+/**
+ * Extract structured role requirements from job description text
+ * Uses LLM to parse and extract only relevant technical requirements
+ * 
+ * @param jdText - Job description text (plain text, may be long)
+ * @returns Extracted role requirements as structured JSON
+ */
+export async function extractRoleRequirements(jdText: string): Promise<RoleRequirements> {
+  // Safety: Truncate long JD to avoid token overflow
+  const MAX_JD_CHARS = 3000;
+  const jdTextTruncated = jdText.substring(0, MAX_JD_CHARS);
+
+  const prompt = `You are a technical recruiter analyzing a job description.
+
+JOB DESCRIPTION:
+${jdTextTruncated}
+
+TASK:
+Extract ONLY technical requirements. Ignore company intro, benefits, culture fluff.
+
+Focus on:
+- Required technical skills (e.g., programming languages, frameworks)
+- Tools and platforms (e.g., AWS, Docker, Git)
+- Years of experience or experience level
+- Other concrete technical requirements
+
+Return STRICT JSON with no extra text:
+
+{
+  "skills": ["skill1", "skill2"],
+  "tools": ["tool1", "tool2"],
+  "experience": "X years in Y",
+  "other_requirements": ["requirement1"]
+}
+
+Rules:
+- Keep items normalized (lowercase, no duplicates)
+- Be specific, not generic
+- List only what is explicitly stated or clearly implied
+- Empty arrays if nothing found`;
+
+  try {
+    const { text } = await generateText({
+      model: groq("llama-3.3-70b-versatile"),
+      prompt: prompt,
+      system: "You are a technical recruiter. ALWAYS respond with ONLY valid JSON, never with additional text.",
+      temperature: 0.3,
+      maxOutputTokens: 1024,
+    });
+
+    // Parse JSON response safely
+    let requirements: RoleRequirements;
+    try {
+      // Try direct parsing first
+      requirements = JSON.parse(text);
+    } catch (parseError) {
+      // Try to extract JSON from text
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        try {
+          requirements = JSON.parse(jsonMatch[0]);
+        } catch (extractError) {
+          console.error("Failed to parse role requirements JSON:", text);
+          // Return empty requirements as fallback
+          return {
+            skills: [],
+            tools: [],
+            experience: "Not specified",
+            other_requirements: [],
+          };
+        }
+      } else {
+        console.error("No JSON found in role requirements response:", text);
+        return {
+          skills: [],
+          tools: [],
+          experience: "Not specified",
+          other_requirements: [],
+        };
+      }
+    }
+
+    // Ensure arrays are normalized (lowercase, trim)
+    if (!Array.isArray(requirements.skills)) requirements.skills = [];
+    if (!Array.isArray(requirements.tools)) requirements.tools = [];
+    if (!Array.isArray(requirements.other_requirements)) requirements.other_requirements = [];
+
+    requirements.skills = requirements.skills
+      .map((s: string) => s.toLowerCase().trim())
+      .filter((s: string) => s.length > 0);
+
+    requirements.tools = requirements.tools
+      .map((t: string) => t.toLowerCase().trim())
+      .filter((t: string) => t.length > 0);
+
+    requirements.other_requirements = requirements.other_requirements
+      .map((r: string) => r.toLowerCase().trim())
+      .filter((r: string) => r.length > 0);
+
+    requirements.experience = (requirements.experience || "Not specified").trim();
+
+    return requirements;
+  } catch (error) {
+    console.error("Error extracting role requirements:", error);
+    return {
+      skills: [],
+      tools: [],
+      experience: "Not specified",
+      other_requirements: [],
+    };
+  }
+}
+
+/**
+ * Merge tech stacks from multiple projects into a single deduplicated array
+ * Normalize tech names (lowercase, trim, remove duplicates)
+ * 
+ * @param projects - Array of project objects with tech array
+ * @returns Combined and deduplicated tech stack
+ */
+export function getCombinedTechStack(
+  projects: { name: string; tech: string[]; fullText?: string }[]
+): string[] {
+  if (!Array.isArray(projects) || projects.length === 0) {
+    return [];
+  }
+
+  const techSet = new Set<string>();
+
+  // Collect all tech from all projects
+  for (const project of projects) {
+    if (Array.isArray(project.tech)) {
+      for (const tech of project.tech) {
+        // Normalize: lowercase, trim, remove extra spaces
+        const normalized = (tech || "")
+          .toLowerCase()
+          .trim()
+          .replace(/\s+/g, " ");
+
+        if (normalized.length > 0) {
+          techSet.add(normalized);
+        }
+      }
+    }
+  }
+
+  // Convert set to array and sort for consistency
+  return Array.from(techSet).sort();
+}
+
+/**
+ * Generate Role Fit score by comparing candidate tech stack with job requirements
+ * Uses LLM to intelligently assess skill alignment
+ * 
+ * @param techStack - Candidate's tech stack (array of tech names)
+ * @param roleRequirements - Job requirements extracted from JD
+ * @returns Role fit score and analysis
+ */
+export async function generateRoleFit({
+  techStack,
+  roleRequirements,
+  language = "en",
+}: {
+  techStack: string[];
+  roleRequirements: RoleRequirements;
+  language?: string;
+}): Promise<RoleFitResult> {
+  const techStackList = Array.isArray(techStack) ? techStack.join(", ") : "";
+  const requiredSkillsList = (roleRequirements.skills || []).join(", ");
+  const requiredToolsList = (roleRequirements.tools || []).join(", ");
+
+  const languageInstructions = language === "hi"
+    ? "आपको पूर्ण हिंदी (देवनागरी लिपि) में उत्तर देना है। तकनीकी शब्द अंग्रेजी में रखें।"
+    : "Respond in English.";
+
+const prompt = `
+You are an expert hiring manager.
+
+${languageInstructions}
+
+JOB REQUIREMENTS:
+
+Skills:
+${requiredSkillsList || "- Not specified"}
+
+Tools:
+${requiredToolsList || "- Not specified"}
+
+Experience:
+${roleRequirements.experience || "Not specified"}
+
+Other Requirements:
+${(roleRequirements.other_requirements || []).join(", ") || "None"}
+
+===
+
+CANDIDATE TECH STACK:
+${techStackList || "- No tech stack provided"}
+
+===
+
+TASK:
+Evaluate how well the candidate matches the job role.
+
+TECHNOLOGY MAPPING RULES (VERY IMPORTANT):
+- Express.js, Node.js, React.js, MongoDB = MERN stack (full-stack JavaScript)
+- Express.js + Node.js = Backend JavaScript
+- React.js = Frontend JavaScript  
+- MongoDB = Database (NoSQL)
+- TypeScript = Typed JavaScript
+- If candidate has Express.js and job needs MERN, consider it a strong match
+- If candidate has some JavaScript experience and job needs MERN, give partial credit
+
+STRICT SCORING RULES:
+
+- 80-100 -> Strong match (most required skills present, same tech stack)
+- 60-79 -> Good match (core skills present, some gaps)
+- 40-59 -> Partial match (some relevant skills, significant gaps)
+- 20-39 -> Weak match (minimal relevant skills)
+- 0-19 -> No match (completely different domain)
+
+CRITICAL RULE (VERY IMPORTANT):
+If candidate domain is DIFFERENT from job domain 
+(e.g., Web Development vs Machine Learning),
+score MUST be below 30.
+
+DO NOT ignore domain mismatch.
+
+===
+
+EVALUATION REQUIREMENTS:
+
+You MUST:
+1. Identify which candidate skills MATCH the job requirements (be generous with related technologies)
+2. Identify which important skills are MISSING
+3. Clearly state if domain is aligned or mismatched
+
+IMPORTANT:
+- Express.js should match MERN/Backend JavaScript roles
+- Node.js should match Backend JavaScript roles
+- React.js should match Frontend JavaScript roles
+- If even ONE relevant skill matches, explicitly mention it
+- If NO skills match, clearly say "no relevant skills match"
+
+IMPORTANT:
+
+- Do NOT list too many missing skills
+- Only include the 3-5 MOST IMPORTANT missing skills
+- Prioritize:
+  1. Core skills required for the role
+  2. Skills directly related to job responsibilities
+
+- Group similar skills together when possible
+  (e.g., "backend skills like Express.js and databases")
+
+- Avoid long comma-separated lists
+===
+
+Return STRICT JSON ONLY:
+
+{
+  "score": number,
+  "matched_skills": ["skill1", "skill2"],
+  "missing_skills": ["skill1", "skill2"],
+  "comment": string
+}
+
+===
+
+COMMENT RULES (VERY IMPORTANT):
+
+- The comment MUST be a complete explanation (NO placeholders like [matched skills])
+- You MUST mention actual skill names
+- For MERN stack roles, if candidate has Express.js, consider it relevant
+
+Structure:
+"Candidate has experience in X, Y which align with the job requirements. However, the candidate is missing A, B, which are important for this role. Overall, the candidate is [fit level]."
+
+- If no skills match:
+"Candidate does not have relevant skills matching the job requirements and is not suitable for this role."
+
+
+FINAL JUDGMENT RULE:
+
+- Instead of generic terms like "partial match",
+  describe the candidate's actual fit:
+
+Examples:
+- "strong frontend fit but lacks backend depth"
+- "good foundational skills but missing production-level experience"
+- "not suitable due to domain mismatch"
+
+
+Rules:
+- Be strict and realistic
+- Do NOT assume skills
+- Penalize domain mismatch heavily
+- DO NOT output placeholders
+`;
+
+  try {
+    const { text } = await generateText({
+      model: groq("llama-3.3-70b-versatile"),
+      prompt: prompt,
+      system: "You are a professional hiring manager. ALWAYS respond with ONLY valid JSON, never with additional text.",
+      temperature: 0.3,
+      maxOutputTokens: 1024,
+    });
+
+    // Parse JSON response safely
+    let result: RoleFitResult;
+    try {
+      result = JSON.parse(text);
+    } catch (parseError) {
+      // Try to extract JSON from text
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        try {
+          result = JSON.parse(jsonMatch[0]);
+        } catch (extractError) {
+          console.error("Failed to parse role fit JSON:", text);
+          return {
+            score: 50,
+            matched_skills: [],
+            missing_skills: [],
+            comment: "Unable to process role fit evaluation.",
+          };
+        }
+      } else {
+        console.error("No JSON found in role fit response:", text);
+        return {
+          score: 50,
+          matched_skills: [],
+          missing_skills: [],
+          comment: "Unable to process role fit evaluation.",
+        };
+      }
+    }
+
+    // Validate and normalize result
+    result.score = Math.max(0, Math.min(100, Number(result.score) || 50));
+    result.matched_skills = Array.isArray(result.matched_skills)
+      ? result.matched_skills.map((s: string) => s.toLowerCase().trim()).filter((s: string) => s)
+      : [];
+    result.missing_skills = Array.isArray(result.missing_skills)
+      ? result.missing_skills.map((s: string) => s.toLowerCase().trim()).filter((s: string) => s)
+      : [];
+    result.comment = (result.comment || "").trim();
+
+    return result;
+  } catch (error) {
+    console.error("Error generating role fit:", error);
+    // Return a middle-ground result on error
+    return {
+      score: 50,
+      matched_skills: [],
+      missing_skills: [],
+      comment: "Role fit evaluation could not be completed due to an error.",
+    };
+  }
+}

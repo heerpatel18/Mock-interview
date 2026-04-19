@@ -14,8 +14,11 @@ import {
 import { getCurrentUser } from "@/lib/actions/auth.action";    //server action to get logged-in user from authentication . returns id , name
 import DisplayTechIcons from "@/components/DisplayTechIcons";
 
-const InterviewDetails = async ({ params }: RouteParams) => {
-  const { id } = await params; // extract interview id from url = firebase document id for interview
+const InterviewDetails = async ({ params, searchParams }: { params: Promise<{ id: string }>, searchParams: Promise<{ lang?: string }> }) => {
+  const { id } = await params;
+  const search = await searchParams;
+
+  const lang = search?.lang === "hi" ? "hi" : "en";
 
   const user = await getCurrentUser(); // Get currently logged-in user from server-side auth
 
@@ -66,6 +69,7 @@ const InterviewDetails = async ({ params }: RouteParams) => {
         type="interview"//  Pass type to Agent so it knows this is an interview (not a different flow like feedback review)
         questions={interview.questions}// Array of generated questions
         feedbackId={feedback?.id} // Existing feedback ID (if any)
+        language={lang} // Interview language (en or hi)
       />
     </>
   );

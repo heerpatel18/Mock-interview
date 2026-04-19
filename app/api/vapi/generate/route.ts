@@ -22,6 +22,7 @@ import { getRandomInterviewCover } from "@/lib/utils";
 import { normalizeResumeText, extractProjectsWithTech, filterProjectsByTech } from "@/lib/rag/resume-rag";
 import { extractTextFromPdfBuffer } from "@/lib/rag/extract-pdf-text";
 import { MAX_RESUME_CHARS, MAX_PDF_BYTES } from "@/lib/rag/constants";
+import { getStandardQuestions } from "@/lib/rag/getStandardQuestions";
 
 type InterviewMode = "standard" | "resume";
 
@@ -41,7 +42,7 @@ export async function POST(request: Request) {
   let techstack: string;
   let amount: number;
   let userid: string;
-  let companyType = "";
+  let language: "en" | "hi" = "en";
   let jobDescription = "";
   let interviewMode: InterviewMode = "standard";
   let resumeText: string | null = null;
@@ -59,7 +60,7 @@ export async function POST(request: Request) {
       level = String(formData.get("level") ?? "");
       techstack = String(formData.get("techstack") ?? "");
       userid = String(formData.get("userid") ?? "");
-      companyType = String(formData.get("companyType") ?? "").trim();
+      language = (String(formData.get("language") ?? "en") as "en" | "hi");
       jobDescription = String(formData.get("jobDescription") ?? "").trim();
       const amountRaw = formData.get("amount");
       amount =
@@ -149,9 +150,9 @@ export async function POST(request: Request) {
         techstack?: string;
         amount?: number;
         userid?: string;
-        companyType?: string;
         jobDescription?: string;
         mode?: InterviewMode;
+        language?: string;
       };
 
       interviewMode =
@@ -174,7 +175,7 @@ export async function POST(request: Request) {
       level = (body.level ?? "").trim();
       techstack = (body.techstack ?? "").trim();
       userid = (body.userid ?? "").trim();
-      companyType = (body.companyType ?? "").trim();
+      language = (body.language ?? "en") as "en" | "hi";
       jobDescription = (body.jobDescription ?? "").trim();
       amount = Number(body.amount);
     }
@@ -248,7 +249,33 @@ Technologies: ${p.tech.join(", ")}
 Description: ${p.fullText}`)
         .join("\n\n");
 
-      prompt = `You are a senior interviewer creating resume-grounded interview questions.
+      // Choose prompt based on language
+      if (language === "hi") {
+        prompt = `आप एक वरिष्ठ तकनीकी इंटरव्यूअर हैं। आप उम्मीदवार के रिज्यूमे के आधार पर प्रश्न बना रहे हैं।
+
+STRICT LANGUAGE RULES — इन्हें हमेशा follow करो:
+
+1. हर प्रश्न Hindi (Devanagari) में शुरू होना चाहिए
+2. कभी भी English word से sentence शुरू मत करो
+3. ये English words allowed हैं (technical terms): ${techstack}, API, error, server, client, component, state, props, deploy, build, test, async, await, function, class, object, array, database, query, request, response, middleware, cache, memory, thread, process, buffer, stream, FAISS, RAG, embeddings, reranking, query expansion, caching, indexing, retrieval, debugging, evaluation
+4. बाकी सब Hindi में लिखो
+
+❌ गलत उदाहरण:
+- "What happens when FAISS में index grows?"
+- "How does React component re-render होता है?"
+- "Explain करें कि API call कैसे होती है?"
+
+✅ सही उदाहरण:
+- "जब FAISS index memory limit से बढ़ जाता है, तो क्या होता है?"
+- "React component दोबारा render क्यों होता है और इसे कैसे रोका जा सकता है?"
+- "API call fail होने पर आप error को कैसे handle करते हैं?"
+
+प्रश्न हमेशा इन patterns से शुरू करो:
+- "जब ... होता है, तो..."
+- "आपने ... project में कैसे..."
+- "यदि ... हो जाए, तो क्या होगा?"
+- "... में क्या अंतर है?"
+- "आप ... को कैसे optimize करेंगे?"
 
 ${projectContextHeader}
 ${projectsDisplay}
@@ -256,243 +283,246 @@ ${projectsDisplay}
 INTERVIEW CONTEXT:
 - Role: ${role}
 - Experience Level: ${level}
-- Tech Stack Focus: ${techstack}
+- Tech Stack Focus: ${techstack} (MANDATORY - ONLY ask about these technologies)
 - Interview Type: ${type}
 
 QUESTION DISTRIBUTION PLAN (mandatory):
 ${distributionPlan}
 
-CRITICAL RULES:
+CRITICAL RULES - STRICTLY FOLLOW:
 
-1. Use ONLY facts from the provided project context.
-   - Do NOT invent projects, features, or tools.
-   - Keep each question clearly tied to the candidate's real work.
+1. TECH STACK RESTRICTION - MOST IMPORTANT:
+   - ONLY ask questions about technologies mentioned in "Tech Stack Focus": ${techstack}
+   - If a project uses React, Node.js, MongoDB but user only mentioned "Node.js", ONLY ask about Node.js aspects of that project
+   - NEVER ask about technologies not in the user's specified tech stack
+   - Each question MUST reference at least one technology from: ${techstack}
 
-2. Prefer questions about implementation choices and practical trade-offs.
-   - Ask about architecture decisions, retrieval quality, indexing strategy, embedding choices, evaluation, and debugging.
-   - Include at least one specific technology or concept from context (e.g., FAISS, RAG, embeddings, reranking, query expansion, caching).
+2. PROJECT-SPECIFIC QUESTIONS ONLY:
+   - Use ONLY facts from the provided project context above
+   - Do NOT invent projects, features, or tools
+   - Keep each question clearly tied to the candidate's real work in these specific projects
 
-3. DO NOT force every question into outage/concurrency/failure phrasing.
-   - Failures and scaling can appear, but only when naturally relevant.
-   - Keep a balanced set of practical interview questions.
+3. QUESTION FOCUS PRIORITY:
+   - 80% questions about implementation details in the matched projects
+   - 20% questions about general concepts related to the specified tech stack
+   - NEVER deviate to technologies not mentioned by user
 
-4. Avoid generic prompts:
-   - "Tell me about your project"
-   - "What technologies did you use"
-   - "Explain your resume"
+4. AVOID GENERIC QUESTIONS:
+   - "अपने project के बारे में बताएं" ❌
+   - "आपने कौन सी technologies use कीं" ❌
+   - "अपने resume को explain करें" ❌
+   - "React के बारे में बताएं" (if React not in user's tech stack) ❌
 
-5. Question style:
-   - Technical mode: concrete, implementation-focused, scenario-backed.
-   - Behavioral mode: specific incident/decision from real project execution.
-   - Mixed mode: combine both.
+5. SPECIFIC QUESTION STYLE:
+   - Technical mode: concrete, implementation-focused, scenario-backed
+   - Example: "आपके Node.js project में API error handling कैसे implement किया?"
+   - Example: "MongoDB database में query optimization कैसे की?"
+   - Behavioral mode: specific incident/decision from real project execution
 
-6. ALWAYS naturally reference the project name inside the question itself.
+6. PROJECT NAME REFERENCE - MANDATORY:
+   - ALWAYS naturally reference the project name inside the question itself
+   - Example: "आपके Agri360 RAG Bot में जब FAISS index memory limit से बढ़ जाता है, तो क्या होता है?"
+   - Do NOT write generic questions - always tie to a specific project from context
+
+7. TECH STACK VALIDATION:
+   - Before finalizing each question, verify it mentions technology from: ${techstack}
+   - If question doesn't match tech stack, rewrite it to match
+
+8. Generate EXACTLY ${amount} questions in Hindi.
+9. Return ONLY a JSON array of strings.
+10. Follow the exact distribution plan above.
+11. Return questions in grouped order by project as listed in the plan.
+12. No markdown or explanations.`;
+      } else {
+        // English resume prompt (existing)
+        prompt = `You are a senior interviewer creating resume-grounded interview questions.
+
+${projectContextHeader}
+${projectsDisplay}
+
+INTERVIEW CONTEXT:
+- Role: ${role}
+- Experience Level: ${level}
+- Tech Stack Focus: ${techstack} (MANDATORY - ONLY ask about these technologies)
+- Interview Type: ${type}
+
+QUESTION DISTRIBUTION PLAN (mandatory):
+${distributionPlan}
+
+CRITICAL RULES - STRICTLY FOLLOW:
+
+1. TECH STACK RESTRICTION - MOST IMPORTANT:
+   - ONLY ask questions about technologies mentioned in "Tech Stack Focus": ${techstack}
+   - If a project uses React, Node.js, MongoDB but user only mentioned "Node.js", ONLY ask about Node.js aspects of that project
+   - NEVER ask about technologies not in the user's specified tech stack
+   - Each question MUST reference at least one technology from: ${techstack}
+
+2. PROJECT-SPECIFIC QUESTIONS ONLY:
+   - Use ONLY facts from the provided project context above
+   - Do NOT invent projects, features, or tools
+   - Keep each question clearly tied to the candidate's real work in these specific projects
+
+3. QUESTION FOCUS PRIORITY:
+   - 80% questions about implementation details in the matched projects
+   - 20% questions about general concepts related to the specified tech stack
+   - NEVER deviate to technologies not mentioned by user
+
+4. AVOID GENERIC QUESTIONS:
+   - "Tell me about your project" ❌
+   - "What technologies did you use" ❌
+   - "Explain your resume" ❌
+   - "Tell me about React" (if React not in user's tech stack) ❌
+
+5. SPECIFIC QUESTION STYLE:
+   - Technical mode: concrete, implementation-focused, scenario-backed
+   - Example: "In your Node.js project, how did you implement API error handling?"
+   - Example: "How did you optimize MongoDB database queries?"
+   - Behavioral mode: specific incident/decision from real project execution
+
+6. PROJECT NAME REFERENCE - MANDATORY:
+   - ALWAYS naturally reference the project name inside the question itself
    - Example: "In your Agri360 RAG Bot, what happens when FAISS index grows beyond memory limits?"
-   - Do NOT write generic questions - always tie to a specific project from context.
+   - Do NOT write generic questions - always tie to a specific project from context
 
-7. Generate EXACTLY ${amount} questions.
-8. Return ONLY a JSON array of strings.
-9. Follow the exact distribution plan above.
-10. Return questions in grouped order by project as listed in the plan.
-11. No markdown or explanations.`;
+7. TECH STACK VALIDATION:
+   - Before finalizing each question, verify it mentions technology from: ${techstack}
+   - If question doesn't match tech stack, rewrite it to match
+
+8. Generate EXACTLY ${amount} questions.
+9. Return ONLY a JSON array of strings.
+10. Follow the exact distribution plan above.
+11. Return questions in grouped order by project as listed in the plan.
+12. No markdown or explanations.`;
+      }
     } 
     
     else {
       // STANDARD MODE: Generic role/tech-based questions, NO resume context
-      prompt = `You are a senior engineer diagnosing REAL production issues for a ${role} position.
-Your goal is to ask questions that reveal how candidates understand SYSTEM BEHAVIOR under failure and edge cases.
-This is NOT an interview - it's a technical investigation.
+      
+      // ===== RAG APPROACH FOR TECHNICAL INTERVIEWS =====
+      if (type === "technical" && language !== "hi") {
+        console.log("\n========== STANDARD MODE + TECHNICAL TYPE ==========");
+        console.log(`[TECH] Using RAG system for consistent, cost-effective questions`);
+        console.log(`[TECH] Tech Stack: ${techstack}`);
+        console.log(`[TECH] Level: ${level}`);
+        console.log(`[TECH] Questions: ${amount}`);
+        console.log("====================================================\n");
 
-Position Context:
-- Role: ${role}
-- Experience Level: ${level}
-- Tech Stack: ${techstack}
-- Interview Type: ${type === "behavioral" || type === "behavioural" ? "Behavioral/Soft Skills" : type === "technical" ? "Technical (Production Diagnostics)" : "Balanced"}
+        try {
+          const ragResult = await getStandardQuestions({
+            techStack: techstack,
+            level: level,
+            amount: amount,
+            role: role,
+            type: type,
+            language: language,
+            interviewMode: interviewMode,
+          });
 
-${type === "technical" ? `
-⚠️ CRITICAL RULES - NO EXCEPTIONS:
+          if (ragResult.questions.length === 0) {
+            throw new Error("RAG system returned no questions");
+          }
 
-ABSOLUTELY FORBIDDEN PHRASES:
-❌ "How would you..."
-❌ "Walk me through..."
-❌ "Explain..."
-❌ "Describe..."
-❌ "Tell me about..."
-❌ "What would you do..."
-❌ "How do you approach..."
+          console.log(`✅ RAG Generation Complete:`);
+          console.log(`   - Total Questions: ${ragResult.questions.length}`);
+          console.log(`   - From RAG Bank: ${ragResult.totalFromRAG}`);
+          console.log(`   - From LLM Fallback: ${ragResult.totalFromLLM}`);
+          console.log(`   - Sources: ${ragResult.sources.map(s => `${s.tech}(${s.method}:${s.count})`).join(", ")}`);
 
-ONLY ALLOWED QUESTION STARTERS:
-✓ "What happens when..."
-✓ "What occurs if..."
-✓ "How does your system behave when..."
-✓ "What's the runtime impact when..."
-✓ "Which race condition occurs when..."
-✓ "What state inconsistency appears when..."
+          const questions = ragResult.questions;
 
-QUESTION STRUCTURE (MANDATORY):
-Format: "[Concrete System Condition] + [Error/Edge Case/Load] + [Technology-Specific Impact]"
+          // Store interview in Firestore
+          const interviewRef = db.collection("interviews").doc();
+          await interviewRef.set({
+            userId: userid,
+            role: role,
+            techstack: techstack,
+            level: level,
+            type: type,
+            amount: amount,
+            interviewMode: interviewMode,
+            questions: questions,
+            jobDescription: jobDescription,
+            createdAt: new Date().toISOString(),
+            cover: getRandomInterviewCover(),
+          });
 
-Example Structure:
-"What happens when [specific failure scenario] in your [technology] implementation, and [concurrent/cascading effect] occurs?"
+          return Response.json({
+            success: true,
+            interviewId: interviewRef.id,
+            questions: questions,
+            source: "rag-standard-questions",
+            ragStats: {
+              totalFromRAG: ragResult.totalFromRAG,
+              totalFromLLM: ragResult.totalFromLLM,
+              sources: ragResult.sources,
+            },
+          });
+        } catch (ragError) {
+          console.error("❌ RAG system failed, falling back to LLM:", ragError);
+          // Fall through to LLM approach below
+        }
+      }
 
-CONCRETE FAILURE SCENARIOS (must pick ONE per question):
-For Frontend (React/Vue/Angular):
-- State store gets out of sync vs UI rendering
-- Event handlers fire during unmount
-- Memory leak in subscription or timer
-- Race condition with async state updates
-- Event loop blocked by heavy rendering
+      // ===== LLM APPROACH =====
+     if (language === "hi") {
+  prompt = `
+आप एक वरिष्ठ तकनीकी इंटरव्यूअर हैं।
 
-For Backend (Node.js/Express):
-- Event loop blocked by sync operation during high traffic
-- Uncaught async rejection crashes worker
-- Partial write before connection drops
-- Database connection pool exhausted
-- Race condition in concurrent requests modifying same resource
+STRICT LANGUAGE RULES — इन्हें हमेशा follow करो:
 
-For Database/API:
-- N+1 query under load
-- Connection timeout mid-transaction
-- Partial data committed on network failure
-- Third-party API rate limit or timeout
-- Cache invalidation race condition
+1. हर प्रश्न Hindi (Devanagari) में शुरू होना चाहिए
+2. कभी भी English word से sentence शुरू मत करो
+3. ये English words allowed हैं (technical terms): ${techstack}, API, error, server, client, component, state, props, deploy, build, test, async, await, function, class, object, array, database, query, request, response, middleware, cache, memory, thread, process, buffer, stream
+4. बाकी सब Hindi में लिखो
 
-For System-Level:
-- Memory growth unbounded
-- File descriptor exhaustion
-- CPU throttling under sustained load
-- DNS resolution timeout cascades
-- Deployment rolling update mid-request
+❌ गलत उदाहरण:
+- "What happens when Node.js में memory leak होती है?"
+- "How does React component re-render होता है?"
+- "Explain करें कि API call कैसे होती है?"
 
-DEPTH REQUIREMENT (MUST INCLUDE):
-Each question MUST require understanding of:
-${level === "junior" ? `
-- What the system DOES (behavior, not theory)
-- Why it fails in this scenario
-- What observable symptoms appear
-- Simple root cause thinking
-` : level === "mid-level" ? `
-- System behavior under stress
-- Performance and timing implications
-- Trade-offs in failure handling
-- How to collect debugging data
-- Optimization opportunities
-` : `
-- Complex system interactions
-- Subtle timing and ordering issues
-- Performance profile across components
-- Advanced debugging and monitoring
-- Production incident patterns
-`}
+✅ सही उदाहरण:
+- "जब Node.js application में memory leak होती है, तो system का क्या होता है?"
+- "React component दोबारा render क्यों होता है और इसे कैसे रोका जा सकता है?"
+- "API call fail होने पर आप error को कैसे handle करते हैं?"
 
-TECH-SPECIFIC EXAMPLES:
-${techstack.toLowerCase().includes("react") || techstack.toLowerCase().includes("vue") || techstack.toLowerCase().includes("angular") ? `
-React/Vue/Angular Frontend Questions MUST be like:
-- "What happens when setState is called during unmount in React?"
-- "What state inconsistency occurs when async data arrives after component unmounts?"
-- "What's the race condition when two Redux dispatches happen simultaneously?"
-- NOT: "Explain React hooks" or "How would you manage state"
-` : ""}
-${techstack.toLowerCase().includes("node") || techstack.toLowerCase().includes("express") || techstack.toLowerCase().includes("nest") ? `
-Node.js/Express Backend Questions MUST be like:
-- "What happens when a synchronous operation blocks the event loop during high traffic?"
-- "What occurs if a promise rejection happens in an unhandled route?"
-- "How does your system behave when database connection pool is exhausted?"
-- NOT: "How would you structure a REST API" or "Explain middleware"
-` : ""}
-${techstack.toLowerCase().includes("python") || techstack.toLowerCase().includes("django") || techstack.toLowerCase().includes("flask") ? `
-Python Backend Questions MUST be like:
-- "What happens when GIL contention occurs under heavy concurrency?"
-- "What occurs if async/await is mixed with blocking I/O?"
-- "How does the system behave when database ORM query multiplies under N+1 pattern?"
-- NOT: "Explain decorators" or "How would you design this endpoint"
-` : ""}
+प्रश्न हमेशा इन patterns से शुरू करो:
+- "जब ... होता है, तो..."
+- "आपने ... कैसे handle किया?"
+- "यदि ... हो जाए, तो क्या होगा?"
+- "... में क्या अंतर है?"
+- "आप ... को कैसे optimize करेंगे?"
 
-CONCRETE EXAMPLES (Reference - do NOT copy):
+Role: ${role}
+Level: ${level}
+Tech Stack: ${techstack}
+Interview Type: ${type}
 
-BAD (Textbook):
-"How would you handle API failures?"
-"Explain error handling in your backend"
-"Describe your testing strategy"
-
-GOOD (Production Diagnostics):
-"What happens in your Redux store when an API call fails after partial data is already committed?"
-"What occurs when an Express route throws an error after headers are partially sent?"
-"What state inconsistency appears when two identical API requests arrive within 50ms?"
-
-CONSTRAINTS:
-- Generate EXACTLY ${amount} questions (not more, not less)
-- Return ONLY JSON array
-- NO markdown, backticks, or special characters
-- Each question is 1-2 sentences max (concise, direct)
-- NO "and how would you fix it" - focus purely on behavior/diagnosis
-
-QUALITY GATE:
-Before generating each question, ask:
-1. Does it use ONLY allowed starters? (What happens / What occurs / How does)
-2. Does it name a CONCRETE failure scenario?
-3. Does it include SPECIFIC technology from ${techstack}?
-4. Would a junior ask this in an interview, or a senior during post-mortem?
-5. If answer is "could be an interview question", DELETE IT AND CHANGE IT.
-
-Generate EXACTLY ${amount} production diagnostic questions for ${techstack}.
-Return ONLY JSON array format:
-["Question 1", "Question 2", ..., "Question ${amount}"]
-` : type === "behavioral" || type === "behavioural" ? `
-CRITICAL RULES FOR BEHAVIORAL QUESTIONS:
-
-FORBIDDEN PHRASES:
-❌ "Tell me about a time when..."
-❌ "What are your strengths..."
-❌ "Describe your last project"
-❌ "How do you approach..."
-❌ "How would you handle..."
-
-REQUIRED PHRASE STRUCTURES:
-✓ "What happened when..."
-✓ "Walk me through a specific incident when..."
-✓ "Describe exactly what you did when..."
-✓ "What was your decision when..."
-
-FOCUS: REAL DECISIONS UNDER PRESSURE
-- Specific incident, not general approach
-- Decision made (not how you would make it)
-- Outcome and what you learned
-- Trade-offs you accepted
-- Team dynamics you navigated
-
-EXAMPLES:
-
-BAD: "Tell me about a challenging project"
-GOOD: "Walk me through a specific time when a critical deadline shifted mid-sprint. What was your communication to the team?"
-
-BAD: "How do you handle conflicts?"
-GOOD: "Describe a time when you disagreed with an architect's design decision. What did you do?"
-
-CONSTRAINTS:
-- Generate EXACTLY ${amount} questions
-- Return ONLY JSON array
-- NO generic "tell me about" questions
-- Each question is specific incident, not general pattern
-
-Return ONLY JSON:
-["Question 1", "Question 2", ..., "Question ${amount}"]
-` : `
-BALANCED MODE: Technical 50% + Behavioral 50%
-
-Technical Questions:
-- Use ONLY "What happens when", "What occurs if"
-- Focus on system behavior and concrete failures
-- Tech stack specific
-
-Behavioral Questions:
-- Use "What happened when" (past tense, specific)
-- Focus on real decisions under pressure
-- No generic patterns
+अब EXACTLY ${amount} प्रश्न बनाइए।
 
 Return ONLY JSON array:
-["Question 1", "Question 2", ..., "Question ${amount}"]
-`}`;
+["प्रश्न 1", "प्रश्न 2"]
+`;
+}
+ else {
+        prompt = `
+You are a senior engineer diagnosing REAL production issues.
+
+Role: ${role}
+Level: ${level}
+Tech Stack: ${techstack}
+
+Rules:
+- Focus on real-world failures
+- Ask system behavior questions
+- Avoid generic theory
+
+Generate EXACTLY ${amount} questions.
+
+Return ONLY JSON:
+["Question 1", "Question 2"]
+`;
+      }
     }
 
     const { text: responseText } = await generateText({
@@ -503,13 +533,6 @@ Return ONLY JSON array:
 
     // DEBUG: Log final prompt sent to LLM
     console.log("\n========== FINAL PROMPT SENT TO LLM ==========");
-    console.log(`[PROMPT] Mode: ${interviewMode}`);
-    console.log(`[PROMPT] Interview Type: ${type}`);
-    console.log(`[PROMPT] Questions Requested: ${amount}`);
-    console.log(`[PROMPT] Prompt Size: ${prompt.length} chars`);
-    console.log(`[PROMPT] First 200 chars of prompt:`);
-    console.log(`[PROMPT] "${prompt.substring(0, 200).replace(/\n/g, " ")}..."`);
-    console.log("============================================\n");
 
     const jsonMatch = responseText.match(/\[[\s\S]*\]/);
     if (!jsonMatch) {
@@ -517,6 +540,10 @@ Return ONLY JSON array:
     }
 
     const questions: string[] = JSON.parse(jsonMatch[0]);
+    console.log(`[PROMPT] Prompt Size: ${prompt.length} chars`);
+    console.log(`[PROMPT] First 200 chars of prompt:`);
+    console.log(`[PROMPT] "${prompt.substring(0, 200).replace(/\n/g, " ")}..."`);
+    console.log("============================================\n");
 
     if (questions.length !== amount) {
       console.warn(
@@ -525,7 +552,8 @@ Return ONLY JSON array:
     }
     
     // QUALITY VALIDATION: Check question format and depth (applies to all modes)
-    const technicalPhrases = ["what happens", "what occurs", "how does", "when", "impact", "handle", "behavior", "cause", "result"];
+    const englishTechnicalPhrases = ["what happens", "what occurs", "how does", "when", "impact", "handle", "behavior", "cause", "result"];
+    const hindiTechnicalPhrases = ["क्या होता", "कैसे", "कब", "प्रभाव", "handle", "व्यवहार", "कारण", "परिणाम", "जब"];
     const qualityErrors: string[] = [];
 
     questions.forEach((question, idx) => {
@@ -537,10 +565,16 @@ Return ONLY JSON array:
         qualityErrors.push(`Question ${questionNum} is too short (min 20 chars)`);
       }
 
-      // Check 2: Contains technical language
-      const hasTechnicalPhrase = technicalPhrases.some(phrase => q.includes(phrase));
+      // Check 2: Contains technical language (different patterns for different languages)
+      let hasTechnicalPhrase = false;
+      if (language === "hi") {
+        hasTechnicalPhrase = hindiTechnicalPhrases.some(phrase => q.includes(phrase));
+      } else {
+        hasTechnicalPhrase = englishTechnicalPhrases.some(phrase => q.includes(phrase));
+      }
+
       if (!hasTechnicalPhrase) {
-        qualityErrors.push(`Question ${questionNum} lacks technical depth (no phrases like "what happens", "impact", etc.)`);
+        qualityErrors.push(`Question ${questionNum} lacks technical depth (no technical phrases found)`);
       }
     });
 
@@ -564,6 +598,7 @@ Return ONLY JSON array:
       role: role,
       type: type,
       level: level,
+      language: language,
       techstack: techstack.split(",").map((t: string) => t.trim()),
       questions: questions,
       userId: userid,
@@ -571,7 +606,6 @@ Return ONLY JSON array:
       coverImage: getRandomInterviewCover(),
       createdAt: new Date().toISOString(),
       interviewMode: interviewMode,
-      companyType,
       jobDescription,
     };
 

@@ -15,6 +15,7 @@ const InterviewCard = async ({
   type,
   techstack,
   createdAt,
+  language,
 }: InterviewCardProps) => {
   const feedback =
     userId && interviewId
@@ -96,7 +97,7 @@ const InterviewCard = async ({
               href={
                 feedback
                   ? `/interview/${interviewId}/feedback`
-                  : `/interview/${interviewId}`
+                  : `/interview/${interviewId}?lang=${language || "en"}`
               }
             >
               {feedback ? "Check Feedback" : "View Interview"}
