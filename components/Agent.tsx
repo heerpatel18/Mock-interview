@@ -702,28 +702,31 @@ await new Promise<void>((resolve) => {
       {messages.length > 0 && (
         <div className="transcript-border">
           <div className="transcript">
-            {isProcessing ? (
-              <p className="text-lg text-center text-white opacity-100 animate-pulse">
-                सोच रहा हूँ...
-              </p>
-            ) : (
-              <div className="space-y-2">
-                {messages.length > 0 && (
-                  <div
-                    className={`p-2 rounded ${
-                      messages[messages.length - 1].role === 'assistant'
-                        ? 'bg-gray-900/50 text-right ml-8'
-                        : 'bg-gray-700/50 text-left mr-8'
-                    }`}
-                  >
-                    <span className="text-sm font-medium text-gray-300">
-                      {messages[messages.length - 1].role === 'assistant' ? 'AI:' : 'You:'}
-                    </span>
-                    <p className="text-white mt-1">{messages[messages.length - 1].content}</p>
-                  </div>
-                )}
-              </div>
-            )}
+            <div className="space-y-2 max-h-64 overflow-y-auto">
+              {messages.map((message, index) => (
+                <div
+                  key={index}
+                  className={`p-2 rounded ${
+                    message.role === 'assistant'
+                      ? 'bg-gray-900/50 text-right ml-8'
+                      : 'bg-gray-700/50 text-left mr-8'
+                  }`}
+                >
+                  <span className="text-sm font-medium text-gray-300">
+                    {message.role === 'assistant' ? 'AI:' : 'You:'}
+                  </span>
+                  <p className="text-white mt-1">{message.content}</p>
+                </div>
+              ))}
+              {isProcessing && (
+                <div className="p-2 rounded bg-gray-900/50 text-right ml-8">
+                  <span className="text-sm font-medium text-gray-300">AI:</span>
+                  <p className="text-lg text-white opacity-100 animate-pulse mt-1">
+                    सोच रहा हूँ...
+                  </p>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}

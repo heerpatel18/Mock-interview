@@ -88,22 +88,65 @@ IMPORTANT RULES:
 - Give detailed, actionable feedback
 - For each category, explain WHY you gave that score with transcript evidence
 
-Return STRICT JSON ONLY:
+SCORING GUIDELINES (STRICT 0-100 SCALE - ACTUAL NUMBERS, NOT 0-10):
+
+CRITICAL: All scores MUST be actual numbers between 0-100 (e.g., 75, 82, 45, 90).
+NEVER give single digit scores (1-9). NEVER treat this as a 0-10 scale.
+If the description fits 8-10 out of 10, the score should be 80-100 out of 100.
+
+1. Communication Skills
+   - 80-100: Clear explanations with proper terminology and examples
+   - 60-79: Generally clear but occasional vagueness or missing examples
+   - 40-59: Basic explanations, lacks depth or clarity
+   - 20-39: Unclear or confusing explanations
+   - 0-19: Very unclear, unable to articulate ideas
+
+2. Technical Knowledge
+   - 80-100: Strong knowledge of multiple technologies with good depth
+   - 60-79: Solid knowledge of some technologies, decent understanding
+   - 40-59: Basic/limited knowledge of some technologies
+   - 20-39: Very limited or incorrect technical knowledge
+   - 0-19: No meaningful technical knowledge
+
+3. Problem-Solving
+   - 80-100: Clear step-by-step approach, logical thinking, handles complexity
+   - 60-79: Generally methodical, good reasoning with minor gaps
+   - 40-59: Some structure but lacks depth or clear logic
+   - 20-39: Disorganized, struggles with logic
+   - 0-19: No clear problem-solving approach
+
+4. Cultural Fit
+   - 80-100: Strong alignment with company values, demonstrates ownership and teamwork
+   - 60-79: Good alignment, shows some company values
+   - 40-59: Partial alignment, missing some key values
+   - 20-39: Little alignment with company values
+   - 0-19: No alignment with company values
+
+5. Confidence & Clarity
+   - 80-100: Very confident, clear speech, minimal hesitation
+   - 60-79: Mostly confident, generally clear with minor hesitations
+   - 40-59: Somewhat confident, occasional hesitations or unclear moments
+   - 20-39: Low confidence, many hesitations or unclear responses
+   - 0-19: Very low confidence, unable to speak clearly
+
+Return STRICT JSON ONLY with scores as actual 0-100 numbers (NOT 0-10):
 
 {
-  "totalScore": number,
+  "totalScore": number (0-100 scale, e.g., 75),
   "categoryScores": [
-    {"name": "Communication Skills", "score": number, "comment": string},
-    {"name": "Technical Knowledge", "score": number, "comment": string},
-    {"name": "Problem-Solving", "score": number, "comment": string},
-    {"name": "Cultural Fit", "score": number, "comment": string},
-    {"name": "Confidence & Clarity", "score": number, "comment": string}
+    {"name": "Communication Skills", "score": number (0-100), "comment": string},
+    {"name": "Technical Knowledge", "score": number (0-100), "comment": string},
+    {"name": "Problem-Solving", "score": number (0-100), "comment": string},
+    {"name": "Cultural Fit", "score": number (0-100), "comment": string},
+    {"name": "Confidence & Clarity", "score": number (0-100), "comment": string}
   ],
   "strengths": ["Specific strength with example"],
   "areasForImprovement": ["Specific area with actionable advice"],
   "finalAssessment": "Detailed overall assessment with specific recommendations"
 }
-`;
+
+SCORE REMINDER: If candidate explained concepts clearly with proper terminology, their Communication score should be 75-85, NOT 8 or 9. ALWAYS use the full 0-100 range.`;
+
 
     let object: any;
 
@@ -112,7 +155,7 @@ Return STRICT JSON ONLY:
         model: groq("llama-3.3-70b-versatile"),
         prompt,
         system:
-          "Return ONLY valid JSON. No explanations, no markdown.",
+          "Return ONLY valid JSON. All scores MUST be 0-100 scale (e.g., 75, 82), NEVER single digits like 8 or 9. No explanations, no markdown.",
         temperature: 0.3,
       });
 
@@ -330,4 +373,4 @@ export async function getInterviewsByUserId(
   //    ↓
 //feedbackId returned
 //      ↓
-//Frontend displays results
+//Frontend displays results using feedbackId to fetch feedback document

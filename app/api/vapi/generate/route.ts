@@ -464,6 +464,71 @@ CRITICAL RULES - STRICTLY FOLLOW:
         }
       }
 
+      // ===== RAG APPROACH FOR HINDI TECHNICAL INTERVIEWS =====
+      if (type === "technical" && language === "hi") {
+        console.log("\n========== STANDARD MODE + HINDI TECHNICAL TYPE ==========");
+        console.log(`[TECH] Using RAG system for Hindi technical questions`);
+        console.log(`[TECH] Tech Stack: ${techstack}`);
+        console.log(`[TECH] Level: ${level}`);
+        console.log(`[TECH] Questions: ${amount}`);
+        console.log("====================================================\n");
+
+        try {
+          const ragResult = await getStandardQuestions({
+            techStack: techstack,
+            level: level,
+            amount: amount,
+            role: role,
+            type: type,
+            language: language,
+            interviewMode: interviewMode,
+          });
+
+          if (ragResult.questions.length === 0) {
+            throw new Error("RAG system returned no questions");
+          }
+
+          console.log(`✅ Hindi RAG Generation Complete:`);
+          console.log(`   - Total Questions: ${ragResult.questions.length}`);
+          console.log(`   - From RAG Bank: ${ragResult.totalFromRAG}`);
+          console.log(`   - From LLM Fallback: ${ragResult.totalFromLLM}`);
+          console.log(`   - Sources: ${ragResult.sources.map(s => `${s.tech}(${s.method}:${s.count})`).join(", ")}`);
+
+          const questions = ragResult.questions;
+
+          // Store interview in Firestore
+          const interviewRef = db.collection("interviews").doc();
+          await interviewRef.set({
+            userId: userid,
+            role: role,
+            techstack: techstack,
+            level: level,
+            type: type,
+            amount: amount,
+            interviewMode: interviewMode,
+            questions: questions,
+            jobDescription: jobDescription,
+            createdAt: new Date().toISOString(),
+            cover: getRandomInterviewCover(),
+          });
+
+          return Response.json({
+            success: true,
+            interviewId: interviewRef.id,
+            questions: questions,
+            source: "rag-hindi-standard-questions",
+            ragStats: {
+              totalFromRAG: ragResult.totalFromRAG,
+              totalFromLLM: ragResult.totalFromLLM,
+              sources: ragResult.sources,
+            },
+          });
+        } catch (ragError) {
+          console.error("❌ Hindi RAG system failed, falling back to LLM:", ragError);
+          // Fall through to LLM approach below
+        }
+      }
+
       // ===== LLM APPROACH =====
      if (language === "hi") {
   prompt = `
@@ -498,11 +563,12 @@ Level: ${level}
 Tech Stack: ${techstack}
 Interview Type: ${type}
 
-अब EXACTLY ${amount} प्रश्न बनाइए।
+CRITICAL: Generate EXACTLY ${amount} questions in Hindi.
+Do NOT generate more or fewer than ${amount} questions.
 
-Return ONLY JSON array:
-["प्रश्न 1", "प्रश्न 2"]
-`;
+Return ONLY JSON array with exactly ${amount} questions:
+["प्रश्न 1", "प्रश्न 2", "प्रश्न 3"]`;
+
 }
  else {
         prompt = `
@@ -517,11 +583,12 @@ Rules:
 - Ask system behavior questions
 - Avoid generic theory
 
-Generate EXACTLY ${amount} questions.
+CRITICAL: Generate EXACTLY ${amount} questions.
+Do NOT generate more or fewer than ${amount} questions.
 
-Return ONLY JSON:
-["Question 1", "Question 2"]
-`;
+Return ONLY JSON array with exactly ${amount} questions:
+["Question 1", "Question 2", "Question 3"]`;
+
       }
     }
 
@@ -632,4 +699,4 @@ Return ONLY JSON:
 
 export async function GET() {
   return Response.json({ success: true, data: "Thank you!" }, { status: 200 });
-}
+}   

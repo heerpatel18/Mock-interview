@@ -246,20 +246,24 @@ TECHNOLOGY MAPPING RULES (VERY IMPORTANT):
 - If candidate has Express.js and job needs MERN, consider it a strong match
 - If candidate has some JavaScript experience and job needs MERN, give partial credit
 
-STRICT SCORING RULES:
+FLEXIBLE SCORING RULES (USER-FRIENDLY - 0-100 SCALE):
 
-- 80-100 -> Strong match (most required skills present, same tech stack)
-- 60-79 -> Good match (core skills present, some gaps)
-- 40-59 -> Partial match (some relevant skills, significant gaps)
-- 20-39 -> Weak match (minimal relevant skills)
-- 0-19 -> No match (completely different domain)
+CRITICAL: All scores MUST be actual numbers between 0-100 (e.g., 75, 82, 45, 90).
+NEVER give single digit scores (1-9). NEVER treat this as a 0-10 scale.
 
-CRITICAL RULE (VERY IMPORTANT):
-If candidate domain is DIFFERENT from job domain 
-(e.g., Web Development vs Machine Learning),
-score MUST be below 30.
+Score allocation based on skill matches:
+- 80-100 -> Strong match (4+ required skills present, same tech stack)
+- 60-79 -> Good match (3 required skills present, some gaps)
+- 40-59 -> Partial match (2 required skills present, some gaps)
+- 30-39 -> Minimal but relevant match (at least 1 required skill present)
+- 0-29 -> No relevant match (no overlapping skills with job requirements)
 
-DO NOT ignore domain mismatch.
+IMPORTANT FAIRNESS RULES:
+- If candidate has AT LEAST 1 skill that matches job requirements, score MUST be 30 or higher
+- Do NOT penalize too heavily for missing skills if some are present
+- Be generous with skill mapping - consider related technologies as partial matches
+- Only give scores below 30 if there is NO overlapping skills whatsoever
+- Domain alignment is important but should not eliminate score if at least 1 skill matches
 
 ===
 
@@ -306,13 +310,19 @@ COMMENT RULES (VERY IMPORTANT):
 
 - The comment MUST be a complete explanation (NO placeholders like [matched skills])
 - You MUST mention actual skill names
-- For MERN stack roles, if candidate has Express.js, consider it relevant
+- Be encouraging if at least 1 skill matches
+- For MERN stack roles, if candidate has Express.js or MongoDB, consider it relevant
 
-Structure:
-"Candidate has experience in X, Y which align with the job requirements. However, the candidate is missing A, B, which are important for this role. Overall, the candidate is [fit level]."
+Structure for matching skills:
+"Candidate has experience in X, Y which align with the job requirements. To strengthen their profile, the candidate should focus on learning A, B. Overall, the candidate has a [score level] fit for this role."
 
-- If no skills match:
-"Candidate does not have relevant skills matching the job requirements and is not suitable for this role."
+Structure for no matching skills:
+"Candidate's technical background does not overlap with the job requirements in X area. Developing skills in Y would help for this role."
+
+Examples of good comments:
+- "Strong foundational fit with MongoDB experience. Candidate should develop React.js and Node.js skills for a complete MERN profile."
+- "Good database knowledge with MongoDB. Adding JavaScript ecosystem skills (Node.js, React.js) would complete the MERN requirements."
+- "Candidate demonstrates web development interest but is missing the specific MERN stack focus. Transitioning to JavaScript-based development would help."
 
 
 FINAL JUDGMENT RULE:
@@ -321,23 +331,19 @@ FINAL JUDGMENT RULE:
   describe the candidate's actual fit:
 
 Examples:
-- "strong frontend fit but lacks backend depth"
-- "good foundational skills but missing production-level experience"
-- "not suitable due to domain mismatch"
+- "Strong database foundation, needs frontend/backend JavaScript skills"
+- "Good problem-solving skills but missing specific tech stack knowledge"
+- "Web development experience, but not in the MERN stack"
+- "No relevant technical overlap with job requirements"
 
-
-Rules:
-- Be strict and realistic
-- Do NOT assume skills
-- Penalize domain mismatch heavily
-- DO NOT output placeholders
+Remember: If at least 1 skill matches, score should be 30+
 `;
 
   try {
     const { text } = await generateText({
       model: groq("llama-3.3-70b-versatile"),
       prompt: prompt,
-      system: "You are a professional hiring manager. ALWAYS respond with ONLY valid JSON, never with additional text.",
+      system: "You are a professional hiring manager. ALWAYS respond with ONLY valid JSON, never with additional text. All scores MUST be on 0-100 scale (e.g., 75, 82), NEVER single digits like 8 or 9.",
       temperature: 0.3,
       maxOutputTokens: 1024,
     });

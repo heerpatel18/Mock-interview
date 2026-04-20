@@ -30,6 +30,14 @@ This section reflects the latest implementation and should be treated as the pri
 - LLM fallback for unsupported techs now generates questions in the selected language
 - Feedback scoring and comments are generated in the selected language (Hindi uses Devanagari script)
 
+#### Tech Stack Strictness (Current Update - April 2026)
+- **Hindi Pipeline Tech Stack Enforcement**: LLM prompts now strictly enforce user's declared tech stack
+- Initial questions and follow-ups in Hindi interviews must stay within user's mentioned technologies
+- **Example**: If user specifies "Node.js" in tech stack, questions focus only on Node.js, Express, npm, etc. - no questions about Python, Java, or other unrelated technologies
+- **Resume Mode Filtering**: Projects are filtered to match user's tech stack before question generation
+- **Follow-up Questions**: Strictly redirect back to user's tech stack if candidate mentions unrelated technologies
+- **Prompt Engineering**: Added "STRICT TECH STACK REQUIREMENT" sections in all LLM prompts for Hindi pipeline
+
 ---
 
 ## Updated End-to-End Flow
@@ -3204,13 +3212,25 @@ T=6-7s ← Receive transcript or retry
 
 **Processing Steps:**
 
-#### 8.1: Build Prompt for Follow-Up
+#### 8.1: Build Strict Tech Stack Prompt for Follow-Up
 
 **Code:**
 ```typescript
 const generateFollowUp = async (question: string, answer: string) => {
+  // Get tech stack from interview document
+  const techStack = interviewDoc.techstack || [];
+  const userTechStack = techStack.join(", ");
+  
   const prompt = `
 You are an expert technical interviewer conducting an interview in Hindi.
+
+STRICT TECH STACK REQUIREMENT:
+- User mentioned these technologies: ${userTechStack}
+- You MUST ONLY ask questions about these exact technologies
+- If user mentioned "Node.js", ask ONLY about Node.js and related concepts
+- DO NOT ask about other technologies like Python, Java, PHP, etc.
+- Stay within the user's declared tech stack: ${userTechStack}
+- If the answer doesn't relate to these technologies, redirect back to them
 
 Original Question: ${question}
 
@@ -3222,12 +3242,13 @@ Generate a follow-up question in Hindi that:
 3. Uses simple, clear Hindi sentences
 4. Is a single follow-up question (not multiple questions)
 5. Relates directly to what they just answered
+6. STAYS STRICTLY WITHIN the user's tech stack: ${userTechStack}
 
 Respond with ONLY the follow-up question in Hindi, nothing else.
   `;
 ```
 
-#### 8.2: Call OpenRouter LLM API
+#### 8.2: Call OpenRouter LLM API with Tech Stack Context
 
 ```typescript
   const response = await fetch("/api/generate-followup", {
@@ -3236,7 +3257,8 @@ Respond with ONLY the follow-up question in Hindi, nothing else.
     body: JSON.stringify({
       question,
       answer,
-      language: "hi"
+      language: "hi",
+      techStack: interviewDoc.techstack  // ← Pass tech stack for strict filtering
     })
   });
 ```
@@ -3249,11 +3271,12 @@ Content-Type: application/json
 {
   "question": "React में virtual DOM क्या है?",
   "answer": "React में virtual DOM को मैं state management के लिए use करता हूं",
-  "language": "hi"
+  "language": "hi",
+  "techStack": ["React", "TypeScript", "Node.js"]
 }
 ```
 
-#### 8.3: Backend API Handler
+#### 8.3: Backend API Handler with Tech Stack Enforcement
 
 **File:** `app/api/generate-followup/route.ts`
 
@@ -3264,7 +3287,8 @@ Content-Type: application/json
 {
   question: string,
   answer: string,
-  language: string
+  language: string,
+  techStack: string[]  // ← NEW: Tech stack array
 }
 ```
 
@@ -3272,17 +3296,26 @@ Content-Type: application/json
 
 1. **Parse request:**
    ```typescript
-   const { question, answer, language } = await request.json();
+   const { question, answer, language, techStack } = await request.json();
    ```
 
-2. **Build LLM prompt with language support:**
+2. **Build LLM prompt with strict tech stack enforcement:**
    ```typescript
    let systemPrompt = "";
    
    if (language === "hi") {
      systemPrompt = `
 You are an expert technical interviewer conducting interviews in Hindi.
-Rules:
+
+CRITICAL TECH STACK RULES:
+- User declared tech stack: ${techStack.join(", ")}
+- You MUST ONLY generate questions about these exact technologies
+- If user mentioned Node.js, ask about Node.js, Express, npm, etc.
+- NEVER ask about technologies not in: ${techStack.join(", ")}
+- If answer drifts to other tech, redirect back to user's stack
+- Be strict: Only ${techStack.join(" OR ")} questions allowed
+
+Language Rules:
 - Always respond in Hindi (Devanagari script)
 - Keep technical terms in English (React, DOM, state, etc.)
 - Ask probing follow-up questions
@@ -3293,6 +3326,12 @@ Rules:
    } else {
      systemPrompt = `
 You are an expert technical interviewer.
+
+TECH STACK ENFORCEMENT:
+- User technologies: ${techStack.join(", ")}
+- ONLY ask about these technologies
+- Stay within: ${techStack.join(" OR ")}
+
 Rules:
 - Ask probing follow-up questions in English
 - One question only
@@ -3301,7 +3340,7 @@ Rules:
    }
    ```
 
-3. **Call OpenRouter API:**
+3. **Call OpenRouter API with tech stack context:**
    ```typescript
    const response = await fetch("https://openrouter.io/api/v1/chat/completions", {
      method: "POST",
@@ -3323,7 +3362,9 @@ Previous Question: ${question}
 
 Candidate Answer: ${answer}
 
-Generate a follow-up question.
+User Tech Stack: ${techStack.join(", ")}
+
+Generate a follow-up question that stays within these technologies.
            `
          }
        ],
@@ -3336,6 +3377,7 @@ Generate a follow-up question.
 4. **OpenRouter Processing:**
    - Model: `openai/gpt-4o-mini`
    - Language: Hindi or English based on parameter
+   - Tech Stack: Strictly enforced in system prompt
    - Max tokens: 200 (limits response length)
    - Temperature: 0.7 (balanced creativity)
 
@@ -3345,7 +3387,7 @@ Generate a follow-up question.
      "choices": [
        {
          "message": {
-           "content": "आपने कहा कि आप virtual DOM को state management के लिए use करते हो, क्या आप बता सकते हो कि React यह काम कैसे करता है? क्या आप reconciliation algorithm के बारे में जानते हो?"
+           "content": "आपने Node.js में virtual DOM का जिक्र किया, क्या आप बता सकते हो कि आप Express.js के साथ Node.js APIs कैसे बनाते हो?"
          }
        }
      ],
@@ -3360,11 +3402,11 @@ Generate a follow-up question.
    ```json
    {
      "success": true,
-     "followUp": "आपने कहा कि आप virtual DOM को state management के लिए use करते हो, क्या आप बता सकते हो कि React यह काम कैसे करता है?"
+     "followUp": "आपने Node.js में virtual DOM का जिक्र किया, क्या आप बता सकते हो कि आप Express.js के साथ Node.js APIs कैसे बनाते हो?"
    }
    ```
 
-**Output:** Hindi follow-up question
+**Output:** Hindi follow-up question strictly within tech stack
 
 #### 8.4: Frontend Receipt
 
@@ -3383,10 +3425,75 @@ Back in `generateFollowUp()`:
 - Original question (Hindi)
 - Candidate's answer (Hindi)
 - Language flag ("hi")
+- Tech stack array (e.g., ["React", "Node.js", "TypeScript"])
 
 **Output:**
 - Follow-up question (Hindi with English technical terms)
-- Example: "आपने कहा कि आप virtual DOM को state management के लिए use करते हो, क्या आप बता सकते हो कि React यह काम कैसे करता है?"
+- Example: "आपने Node.js में virtual DOM का जिक्र किया, क्या आप बता सकते हो कि आप Express.js के साथ Node.js APIs कैसे बनाते हो?"
+
+---
+
+## Tech Stack Matching Logic for Hindi Pipeline
+
+### Initial Question Generation (Standard Mode)
+
+When user selects Hindi language, the initial questions are generated with tech stack context:
+
+**File:** `app/api/vapi/generate/route.ts`
+
+**Updated Prompt for Hindi:**
+```typescript
+const prompt = `
+Generate ${amount} technical interview questions in Hindi for a ${level} ${role}.
+
+TECH STACK REQUIREMENT:
+- User specified technologies: ${techstack.join(", ")}
+- Generate questions ONLY about these technologies
+- If user mentioned "Node.js", focus on Node.js concepts
+- Do not include questions about other technologies
+- Stay strictly within: ${techstack.join(" OR ")}
+
+Language: Hindi (Devanagari script)
+Technical terms: Keep in English
+Difficulty: ${level}
+Format: JSON array of strings
+`;
+```
+
+### Resume Mode Tech Stack Filtering
+
+For resume-based interviews in Hindi:
+
+1. **Extract projects** from resume PDF
+2. **Filter by user's tech stack** - only include projects that match declared technologies
+3. **Generate questions** based on filtered projects
+4. **Follow-ups stay within** the matched project technologies
+
+**Example:**
+- User declares: "Node.js, React, MongoDB"
+- Resume has projects: 
+  - Project A: Node.js, Express, MongoDB
+  - Project B: Python, Django, PostgreSQL
+  - Project C: React, TypeScript, Tailwind
+- **Filtered projects:** A and C (B excluded)
+- **Questions generated:** About Node.js/Express/MongoDB from Project A, React/TypeScript from Project C
+- **Follow-ups:** Stay within Node.js, React, MongoDB, Express, TypeScript
+
+### Tech Stack Enforcement Examples
+
+**✅ ALLOWED (User mentioned Node.js):**
+- "Node.js में event loop कैसे काम करता है?"
+- "Express.js middleware का use कैसे करते हैं?"
+- "MongoDB connection pooling क्या है?"
+
+**❌ NOT ALLOWED (Drifts to other tech):**
+- "Python में Django ORM कैसे use करते हैं?" (Python not in user's stack)
+- "Java Spring Boot configuration क्या है?" (Java not mentioned)
+- "PHP Laravel routing कैसे काम करता है?" (PHP not in stack)
+
+**Redirect Logic:**
+- If candidate mentions unrelated technology → Redirect back
+- Example: Candidate says "Python में भी यही concept है" → Follow-up: "लेकिन आपने Node.js का जिक्र किया था, Node.js में यह कैसे implement करते हैं?"
 
 ---
 

@@ -276,11 +276,23 @@ Return ONLY JSON array format:
     // Parse JSON response
     try {
       const parsed = JSON.parse(responseText);
-      if (Array.isArray(parsed) && parsed.length >= count) {
-        return parsed.slice(0, count) as string[];
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        // Use what we got, even if not exactly the requested count
+        // This prevents empty arrays when LLM generates 2 instead of 3 questions
+        console.log(`✅ LLM generated ${parsed.length} questions (requested ${count})`);
+        return parsed.slice(0, Math.min(parsed.length, count)) as string[];
       }
     } catch (e) {
       console.warn("⚠️ Failed to parse LLM response:", e);
+      // Try to extract questions from text if JSON parsing fails
+      const questionMatches = responseText.match(/"([^"]+)"/g);
+      if (questionMatches && questionMatches.length > 0) {
+        const extractedQuestions = questionMatches
+          .slice(0, count)
+          .map(match => match.slice(1, -1)); // Remove quotes
+        console.log(`✅ Extracted ${extractedQuestions.length} questions from text`);
+        return extractedQuestions;
+      }
     }
 
     // Fallback: return empty array (will be handled by caller)
