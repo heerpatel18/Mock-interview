@@ -123,6 +123,42 @@ export interface GetStandardQuestionsResult {
   totalFromLLM: number;
 }
 
+function normalizeHindiQuestion(question: string): string {
+  const trimmed = question.trim().replace(/^["'\-–—\s]+/, "");
+
+  const rewrites: Array<[RegExp, string]> = [
+    [/^what happens when\b[:\s-]*/i, "जब "],
+    [/^what occurs if\b[:\s-]*/i, "यदि "],
+    [/^how does\b[:\s-]*/i, "कैसे "],
+    [/^how do(es)?\b[:\s-]*/i, "कैसे "],
+    [/^when\b[:\s-]*/i, "जब "],
+    [/^why\b[:\s-]*/i, "क्यों "],
+    [/^explain\b[:\s-]*/i, "समझाइए कि "],
+  ];
+
+  for (const [pattern, replacement] of rewrites) {
+    if (pattern.test(trimmed)) {
+      return trimmed.replace(pattern, replacement).trim();
+    }
+  }
+
+  return trimmed;
+}
+
+function finalizeQuestionsForLanguage(
+  questions: string[],
+  language: "en" | "hi"
+): string[] {
+  if (language !== "hi") {
+    return questions.map((question) => question.trim()).filter(Boolean);
+  }
+
+  return questions
+    .map(normalizeHindiQuestion)
+    .map((question) => question.replace(/\s{2,}/g, " ").trim())
+    .filter(Boolean);
+}
+
 /**
  * Distribute questions evenly across tech stack
  * @param techs Array of technologies
@@ -206,8 +242,8 @@ export function getQuestionsFromRAG(
     availableLevels: STANDARD_QUESTIONS[normalized] ? Object.keys(STANDARD_QUESTIONS[normalized]) : [],
   });
 
-  const levelQuestions = questions[level];
-  if (!levelQuestions || levelQuestions.length === 0) {
+  const levelQuestions = questions[level] as readonly string[] | undefined;
+  if (!levelQuestions?.length) {
     console.warn(
       `❌ Tech "${normalized}" has no ${level} questions in RAG bank`
     );
@@ -215,7 +251,7 @@ export function getQuestionsFromRAG(
   }
 
   const selected = selectRandomQuestions(
-    levelQuestions as string[],
+    [...levelQuestions],
     count,
     askedSet
   );
@@ -243,8 +279,15 @@ export async function fallbackToLLM(
   );
 
   const languageInstructions = language === "hi"
-    ? "Respond in Hindi (Devanagari script). Keep technical terms and technology names in English."
+    ? `Respond ONLY in Hindi (Devanagari script). Keep technical terms and technology names in English.
+Every question must begin in Hindi, never with an English word.`
     : "Respond in English.";
+
+  const starterRules = language === "hi"
+    ? `- Never start a question with English phrases like "What happens when", "What occurs if", "How does", "Explain", "When", or "Why"
+- Start every question with Hindi wording such as "जब", "यदि", "कैसे", "क्यों", or "आप"
+- The first visible character of every question must be Hindi (Devanagari)`
+    : `- Use ONLY question starters: "What happens when", "What occurs if", "How does"`;
 
   const prompt = `You are a senior engineer creating technical interview questions.
 
@@ -257,11 +300,12 @@ ${languageInstructions}
 Generate EXACTLY ${count} production diagnostic technical questions for a ${level} ${role} with ${tech} experience.
 
 CRITICAL RULES:
-- Use ONLY question starters: "What happens when", "What occurs if", "How does"
+- Focus only on ${tech}
 - Each question must be concrete, specific, and tech-focused
 - Focus on system behavior under failure/edge cases
 - NO generic "Explain" or "Tell me about" questions
 - Each question 1-2 sentences max
+${starterRules}
 
 Return ONLY JSON array format:
 ["Question 1", "Question 2", ..., "Question ${count}"]`;
@@ -280,7 +324,10 @@ Return ONLY JSON array format:
         // Use what we got, even if not exactly the requested count
         // This prevents empty arrays when LLM generates 2 instead of 3 questions
         console.log(`✅ LLM generated ${parsed.length} questions (requested ${count})`);
-        return parsed.slice(0, Math.min(parsed.length, count)) as string[];
+        return finalizeQuestionsForLanguage(
+          parsed.slice(0, Math.min(parsed.length, count)) as string[],
+          language
+        );
       }
     } catch (e) {
       console.warn("⚠️ Failed to parse LLM response:", e);
@@ -291,7 +338,7 @@ Return ONLY JSON array format:
           .slice(0, count)
           .map(match => match.slice(1, -1)); // Remove quotes
         console.log(`✅ Extracted ${extractedQuestions.length} questions from text`);
-        return extractedQuestions;
+        return finalizeQuestionsForLanguage(extractedQuestions, language);
       }
     }
 

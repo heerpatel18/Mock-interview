@@ -12,12 +12,18 @@
 import Image from "next/image";
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
-
+import { useWebcam } from "@/hooks/useWebcam";
+import { useMediaPipe } from "@/hooks/useMediaPipe";
+import { usePostureDetection } from "@/hooks/usePostureDetection";
+import { useAnalysisLoop } from "@/hooks/useAnalysisLoop";
 import { cn } from "@/lib/utils";
 import { vapi } from "@/lib/vapi.sdk";
-import { interviewer } from "@/constants";
 import { createFeedback } from "@/lib/actions/general.action";
 import type { AgentProps, SavedMessage } from "@/types";
+
+import { interviewer } from "@/constants";
+import { VideoPreview } from "@/components/interview/VideoPreview";
+import { LiveMetricsBar } from "@/components/interview/LiveMetricsBar";
 
 
 enum CallStatus {
@@ -42,7 +48,6 @@ const Agent = ({
   const [callStatus, setCallStatus] = useState<CallStatus>(CallStatus.INACTIVE);   // State to track current status of the call (inactive, connecting, active, finished). 
   const [messages, setMessages] = useState<SavedMessage[]>([]);    // Local state to store transcript during interview. Each message has a role + content 
   const [isSpeaking, setIsSpeaking] = useState(false);      // State to track if AI interviewer is currently speaking
-  const [lastMessage, setLastMessage] = useState<string>(""); //  State to store content of the last message received
 
   // Interview state management
   const [interviewStage, setInterviewStage] = useState<'greeting' | 'waitingGreetingReply' | 'startInterview' | 'question1' | 'question2' | 'question3' | 'completed'>('greeting');
@@ -54,11 +59,31 @@ const Agent = ({
   const feedbackGeneratedRef = useRef(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
+  // Webcam and MediaPipe hooks
+  const { videoRef, isActive: webcamActive, startCamera, stopCamera } = useWebcam();
+  const { analyzeFrame } = useMediaPipe();
+  const { analyzePosture } = usePostureDetection();
+  const { liveMetrics, sessionSeconds, getMetricsSummary, resetMetrics } = useAnalysisLoop({
+    videoRef,
+    analyzeFrame,
+    analyzePosture,
+    isActive: webcamActive,
+  });
+
   useEffect(() => {
     
     const onCallStart = async () => {
       console.log("✅ Call started");
       setCallStatus(CallStatus.ACTIVE);
+      
+      // Start webcam for video analysis
+      try {
+        resetMetrics();        // ← reset FIRST
+        await startCamera();   // ← then start camera
+        console.log("📹 Webcam started for video analysis");
+      } catch (error) {
+        console.error("❌ Failed to start webcam:", error);
+      }
       
       // Log all questions at the start of interview
       if (questions && questions.length > 0) {
@@ -76,7 +101,7 @@ const Agent = ({
       setCallStatus(CallStatus.FINISHED);
     };
 
-    const onMessage = (message: any) => { 
+    const onMessage = (message: unknown) => { 
       console.log("📩 RAW MESSAGE RECEIVED:", message);
       
       // Only handle final transcripts, ignore partial ones
@@ -169,9 +194,11 @@ const Agent = ({
       setIsSpeaking(false);
     };
 
-    const onError = (error: Error) => {
-      console.log("Error:", error);
-    };
+   const onError = (error: any) => {
+  console.log("🚨 FULL VAPI ERROR:");
+  console.log(JSON.stringify(error, null, 2));
+  console.log("RAW OBJECT:", error);
+};
 
     vapi.on("call-start", onCallStart);
     vapi.on("call-end", onCallEnd);
@@ -194,17 +221,13 @@ const Agent = ({
       vapi.off("speech-end", onSpeechEnd);
       vapi.off("error", onError);
     };
-  }, [language, questions]);
+  }, [language, questions, resetMetrics, startCamera]);
 
 
 
 
 
   useEffect(() => {
-    if (messages.length > 0) {
-      setLastMessage(messages[messages.length - 1].content); //Shows most recent transcript on screen.
-    }
-
     // MAIN 2 
     //sends transcript to the backend.
     const handleGenerateFeedback = async (messages: SavedMessage[]) => {
@@ -228,6 +251,12 @@ const Agent = ({
 
       console.log("Generating feedback with messages:", messages);
 
+      // Get video summary if webcam was active
+      const videoSummary = getMetricsSummary();
+      if (videoSummary) {
+        console.log("📊 Video summary:", videoSummary);
+      }
+
       // MAIN
       try { // send this 4 gen.act.ts creates feedback, it eval , generates feedback , saved in fb , return result -> returns true and f id 
         const { success, feedbackId: id, error } = await createFeedback({
@@ -235,6 +264,7 @@ const Agent = ({
           userId: userId!,
           transcript: messages,
           feedbackId,
+          videoSummary,
         });
 
         // Depending on success of feedback generation, navigate to the feedback page or show an error message. If feedback is generated successfully, it navigates to the feedback page for the interview. If there is an error during feedback generation, it logs the error and shows an alert to the user, then navigates back to the home page. This ensures that the user receives appropriate feedback on the outcome of their interview and can review their performance if feedback was generated successfully.
@@ -282,7 +312,7 @@ const Agent = ({
     return () => {
       if (timer) clearTimeout(timer);
     };
-  }, [messages, callStatus, feedbackId, interviewId, router, type, userId]); // Dependency array
+  }, [messages, callStatus, feedbackId, interviewId, router, type, userId, getMetricsSummary, webcamActive]); // Dependency array
 
 
 
@@ -308,6 +338,15 @@ const handleCall = async () => {
 
       setMessages([]);
       setCallStatus(CallStatus.ACTIVE);
+
+      // Start webcam for video analysis
+      try {
+        await startCamera();
+        resetMetrics();
+        console.log("📹 Webcam started for video analysis");
+      } catch (error) {
+        console.error("❌ Failed to start webcam:", error);
+      }
 
       // ✅ Greeting FIRST - start TTS immediately
       setInterviewStage('greeting');
@@ -355,24 +394,15 @@ const handleCall = async () => {
         language,
         questionsCount: questions?.length,
       });
+      console.log("interviewer value:", interviewer);
+      console.log("type:", typeof interviewer);
 
       await vapi.start(interviewer, {
-  variableValues: {
-    questions: formattedQuestions,
-    language: "English",
-  },
-
-    voice: {
-      provider: "11labs",
-      voiceId: "21m00Tcm4TlvDq8ikWAM",
-    },
-    transcriber: {
-      provider: "deepgram",
-      model: "nova-2",
-      language: "en",
-  
-  },
-});
+        variableValues: {
+          questions: formattedQuestions,
+          language: "English",
+        },
+      });
 
     }
   } catch (error) {
@@ -390,6 +420,10 @@ const handleCall = async () => {
     stopRef.current = true;
 
     setCallStatus(CallStatus.FINISHED);
+
+    // Stop webcam
+    stopCamera();
+    console.log("📹 Webcam stopped");
 
     // Stop Vapi for English mode
     if (language === "en") {
@@ -697,6 +731,19 @@ await new Promise<void>((resolve) => {
             <h3>{userName}</h3>
           </div>
         </div>
+
+        {/* Video Preview */}
+        {webcamActive && (
+          <div className="w-full max-w-md mx-auto">
+            <VideoPreview
+              videoRef={videoRef}
+              isActive={webcamActive}
+              liveMetrics={liveMetrics}
+              sessionSeconds={sessionSeconds}
+            />
+            <LiveMetricsBar summary={getMetricsSummary()} />
+          </div>
+        )}
       </div>
 
       {messages.length > 0 && (

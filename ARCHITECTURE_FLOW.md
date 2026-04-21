@@ -3527,15 +3527,15 @@ USER CLICKS "CALL"
          ↓
     ┌─────────────────────────────────────────┐
     │ 1. QUESTION PHASE                       │
-    │    ─────────────────                   │
+    │    ─────────────────                    │
     │ a) Get question[i] from Firestore       │
-    │    "React में virtual DOM क्या है?"    │
+    │    "React में virtual DOM क्या है?"         │
     │                                         │
     │ b) Call speakHindi(question)            │
     │    │                                    │
     │    ├─→ POST /api/sarvam-tts             │
     │    │   ├─ Input: Hindi text             │
-    │    │   ├─ Sarvam processing: TTS model │
+    │    │   ├─ Sarvam processing: TTS model  │
     │    │   ├─ Output: Base64 WAV audio      │
     │    │   ├─ Frontend: Play audio (3s)     │
     │    │   └─ Wait until audio finishes     │
@@ -3972,5 +3972,201 @@ catch (error) {
 - Echo cancellation: true
 - Noise suppression: true
 - Auto gain control: true
+
+---
+
+
+
+
+
+
+
+
+
+## 🎥 Webcam & MediaPipe Video Analysis Flow (April 2026)
+
+**Complete Local Video Processing Pipeline for Confidence Scoring**
+
+### Overview
+- **Purpose**: Enhance Confidence sector scoring with non-verbal cues
+- **Scope**: Only affects Confidence score (50% transcript + 50% video metrics)
+- **Privacy**: All processing happens locally in browser, no video uploads
+- **Performance**: Analysis throttled to every 7 seconds (not every frame)
+
+### End-to-End Video Flow
+
+#### 1) Interview Start (`components/Agent.tsx`)
+
+**Trigger**: User clicks "Call" button
+```
+User Action: Click "Call"
+↓
+Agent.handleCall()
+↓
+Webcam Activation
+├── navigator.mediaDevices.getUserMedia({video: true})
+├── Create video element + stream
+├── Start MediaPipe face landmark detection
+└── Initialize analysis loop (every 7 seconds)
+```
+
+**Components Involved**:
+- `useWebcam()` hook: Camera access + video stream
+- `useMediaPipe()` hook: Face landmark model loading
+- `usePostureDetection()` hook: Pose estimation model
+- `useAnalysisLoop()` hook: Coordinated analysis scheduling
+
+#### 2 Real-time Analysis Loop (`hooks/useAnalysisLoop.ts`)
+
+**Frequency**: Every 7 seconds (not every frame)
+```
+Browser Animation Frame Loop
+↓
+Check timestamp: (current - lastAnalysis) >= 7000ms
+↓
+YES → Run Analysis
+├── analyzeFrame() → Face metrics (eye contact, smiling, looking down)
+├── analyzePosture() → Body posture (good/bad)
+├── Update session counters
+├── Calculate percentages
+└── Update live UI metrics
+↓
+NO → Skip, continue loop
+```
+
+**Metrics Tracked**:
+- `eyeContactPct`: % of time eyes visible to camera
+- `lookingDownPct`: % of time head tilted down
+- `smilingPct`: % of time mouth smiling
+- `posturePct`: % of time good upright posture
+- `distractedCount`: Number of sudden head movements
+
+#### 3) Live UI Updates (`components/interview/VideoPreview.tsx` + `LiveMetricsBar.tsx`)
+
+**Real-time Display**:
+```
+VideoPreview Component
+├── Live video feed
+├── Session timer
+├── Status badges:
+│   ├── Eye contact: Good/Needs attention
+│   ├── Smile: Good/Needs attention
+│   ├── Posture: Good/Needs attention
+│   └── Face visible: Good/Needs attention
+
+LiveMetricsBar Component
+├── Eye contact: XX%
+├── Posture: XX%
+├── Smile: XX%
+└── Distracted: X times
+```
+
+#### 4) Interview End (`components/Agent.tsx`)
+
+**Trigger**: User clicks "End Call"
+```
+User Action: Click "End Call"
+↓
+Agent.handleEndCall()
+↓
+Stop Analysis
+├── Stop webcam stream
+├── Clear analysis timers
+├── Get final metrics summary
+└── Build videoSummary JSON
+```
+
+**Final Video Summary**:
+```typescript
+{
+  eyeContactPct: number,    // 0-100
+  lookingDownPct: number,   // 0-100
+  smilingPct: number,       // 0-100
+  posturePct: number,       // 0-100
+  distractedCount: number,  // 0+
+  totalFrames: number,      // Analysis count
+  durationMinutes: number   // Session length
+}
+```
+
+#### 5) Feedback Generation (`lib/actions/general.action.ts`)
+
+**Integration Point**: `createFeedback()` receives `videoSummary?`
+```
+Transcript + Video Summary
+↓
+LLM Prompt Enhancement
+├── Content: Transcript only
+├── Communication: Transcript only
+├── Technical: Transcript only
+├── Overall: Transcript only
+└── Confidence: 50% transcript + 50% video metrics
+```
+
+**Confidence Scoring Logic**:
+- **Transcript Analysis**: Hesitation, clarity, confidence in responses
+- **Video Analysis**: Eye contact, posture, smiling frequency, distractions
+- **Combined Score**: Weighted average of both factors
+- **LLM Prompt**: "For Confidence & Clarity, incorporate video analysis as 50% of the score weighting"
+
+#### 6) UI Report Display (`app/(root)/interview/[id]/feedback/page.tsx`)
+
+**Enhanced Confidence Section**:
+```
+Confidence Score: XX/100
+├── Transcript Factors: [hesitation analysis, clarity assessment]
+└── Video Factors: [eye contact %, posture %, smiling %, distractions]
+```
+
+### Technical Implementation Details
+
+#### MediaPipe Models Used
+- **Face Landmarker**: `@mediapipe/tasks-vision` (face landmarks, blendshapes)
+- **Pose Landmarker**: `@mediapipe/tasks-vision` (body posture detection)
+
+#### Browser APIs Required
+- `navigator.mediaDevices.getUserMedia()` - Camera access
+- `requestAnimationFrame()` - Analysis scheduling
+- `HTMLVideoElement` - Video stream display
+
+#### Performance Optimizations
+- **Throttling**: Analysis every 7 seconds vs every frame (60fps)
+- **Local Processing**: No server uploads, all client-side
+- **Model Caching**: Face landmark models loaded once per session
+- **Error Handling**: Graceful fallback if camera unavailable
+
+#### Data Flow Summary
+```
+Interview Start
+├── Webcam ON → MediaPipe ON → Analysis Loop ON
+├── Audio Pipeline ON (Vapi/Hindi)
+└── Live metrics displayed
+
+During Interview
+├── Every 7s: Capture frame → Analyze → Update metrics
+└── UI shows real-time feedback
+
+Interview End
+├── Webcam OFF → MediaPipe OFF → Analysis Loop OFF
+├── Build videoSummary JSON
+├── Call createFeedback(transcript, videoSummary)
+└── LLM generates scores (Confidence enhanced)
+
+UI Display
+└── Report shows video analysis factors in Confidence section
+```
+
+### Privacy & Security
+- **No Video Storage**: Frames never leave browser
+- **No Server Uploads**: All processing local
+- **Camera Permission**: Explicit user consent required
+- **Session Only**: Metrics cleared on page refresh
+
+### Fallback Behavior
+- **No Camera**: Uses transcript-only confidence scoring
+- **Camera Denied**: Graceful degradation, no interview blocking
+- **Analysis Errors**: Continues with available metrics
+
+This implementation provides rich non-verbal feedback while maintaining user privacy and system performance.
 
 

@@ -3,6 +3,7 @@ export interface CreateFeedbackParams {
   userId: string;
   transcript: SavedMessage[];
   feedbackId?: string;
+  videoSummary?: VideoSummary;
 }
 
 export interface GetFeedbackByInterviewIdParams {
@@ -27,6 +28,7 @@ export interface Interview {
   userId: string;
   role: string;
   type: string;
+  language?: "en" | "hi";
   techstack: string[];
   level: string;
   questions: string[];
@@ -54,6 +56,28 @@ export interface CategoryScore {
   name: string;
   score: number;
   comment: string;
+}
+
+export interface VideoSummary {
+  eyeContactPct: number;
+  lookingDownPct: number;
+  smilingPct: number;
+  posturePct: number;
+  distractedCount: number;
+  totalFrames: number;
+  durationMinutes: number;
+}
+
+export interface FeedbackResult {
+  overall: number;
+  content: number;
+  communication: number;
+  confidence: number;
+  eyeContact: number;
+  posture: number;
+  strength: string;
+  improvement: string;
+  summary: string;
 }
 
 export interface AgentProps {
@@ -85,5 +109,4 @@ export interface InterviewCardProps {
 export interface RouteParams {
   params: Promise<{ id: string }>;
 }
-
 

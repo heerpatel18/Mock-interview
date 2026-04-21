@@ -18,12 +18,11 @@ const InterviewDetails = async ({ params, searchParams }: { params: Promise<{ id
   const { id } = await params;
   const search = await searchParams;
 
-  const lang = search?.lang === "hi" ? "hi" : "en";
-
   const user = await getCurrentUser(); // Get currently logged-in user from server-side auth
 
   const interview = await getInterviewById(id); //Fetch interview document(+ ques) from Firestore using the ID
   if (!interview) redirect("/");
+  const lang = interview.language === "hi" || search?.lang === "hi" ? "hi" : "en";
 
   const feedback = await getFeedbackByInterviewId({
     interviewId: id,

@@ -24,7 +24,7 @@ import type {
 
 
 export async function createFeedback(params: CreateFeedbackParams) {
-  const { interviewId, userId, transcript, feedbackId } = params;
+  const { interviewId, userId, transcript, feedbackId, videoSummary } = params;
 
   try {
     if (!interviewId || !userId || !transcript || transcript.length === 0) {
@@ -48,7 +48,8 @@ export async function createFeedback(params: CreateFeedbackParams) {
     const jobDescription =
       interviewData?.jobDescription?.trim() ||
       "No job description provided.";
-    const language = interviewData?.language || "en";
+    const transcriptLooksHindi = /[\u0900-\u097F]/.test(formattedTranscript);
+    const language = interviewData?.language || (transcriptLooksHindi ? "hi" : "en");
     console.log("📄 JD:", jobDescription.substring(0, 200));
     console.log("🗣️ Transcript:", formattedTranscript.substring(0, 200));
     console.log("🌐 Language:", language);
@@ -68,6 +69,14 @@ ${jobDescription}
 
 INTERVIEW TRANSCRIPT:
 ${formattedTranscript}
+${videoSummary ? `
+VIDEO ANALYSIS (${videoSummary.durationMinutes} min session):
+- Eye contact: ${videoSummary.eyeContactPct}% of session
+- Looking down: ${videoSummary.lookingDownPct}% of session
+- Smiling / engaged: ${videoSummary.smilingPct}% of session
+- Good posture: ${videoSummary.posturePct}% of session
+- Distracted moments: ${videoSummary.distractedCount} times
+` : ''}
 
 Evaluate the candidate across these 5 categories. Be SPECIFIC and DETAILED - use concrete examples from the transcript. Do NOT be generic.
 
@@ -79,7 +88,14 @@ Evaluate the candidate across these 5 categories. Be SPECIFIC and DETAILED - use
 
 4. Cultural Fit - Based on BOTH transcript AND job description, how well do they align with company values (teamwork, ownership, learning mindset)? Give specific examples.
 
-5. Confidence & Clarity - How confident were their responses? Did they hesitate or speak clearly? Give specific examples.
+5. Confidence & Clarity - How confident were their responses? Did they hesitate or speak clearly? Give specific examples.${videoSummary ? ' Also consider video metrics: eye contact, posture, smiling frequency, and distracted moments should positively influence confidence score.' : ''}
+
+IMPORTANT RULES:
+- Use SPECIFIC examples from the transcript (quote their actual words when relevant)
+- Be honest and realistic - don't sugarcoat weaknesses
+- Cultural Fit MUST consider both transcript behavior AND job description values
+- Give detailed, actionable feedback
+- For each category, explain WHY you gave that score with transcript evidence${videoSummary ? '\n- For Confidence & Clarity, incorporate video analysis as 50% of the score weighting' : ''}
 
 IMPORTANT RULES:
 - Use SPECIFIC examples from the transcript (quote their actual words when relevant)
