@@ -1,5 +1,9 @@
-import { useEffect, useRef, useState } from "react";
-import { FaceLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
+import { useEffect, useRef, useState, useCallback } from "react";
+import {
+  FaceLandmarker,
+  PoseLandmarker,
+  FilesetResolver,
+} from "@mediapipe/tasks-vision";
 
 export type MediaPipeFaceAnalysis = {
   eyeContact: boolean;
@@ -8,112 +12,166 @@ export type MediaPipeFaceAnalysis = {
   faceVisible: boolean;
 };
 
+export type PostureAnalysis = {
+  postureGood: boolean;
+  shoulderDiff: number;
+};
+
 export const useMediaPipe = () => {
   const faceLandmarkerRef = useRef<FaceLandmarker | null>(null);
+  const poseLandmarkerRef = useRef<PoseLandmarker | null>(null);
   const [isLoaded, setIsLoaded] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let isMounted = true;
 
-    const loadFaceLandmarker = async () => {
+    const loadModels = async () => {
       try {
-        if (typeof window === "undefined") {
-          return;
-        }
+        if (typeof window === "undefined") return;
 
-        const wasmFileset = await FilesetResolver.forVisionTasks(
-          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
-        );
-        const faceLandmarker = await FaceLandmarker.createFromOptions(wasmFileset, {
-          baseOptions: {
-            modelAssetPath:
-              "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-          },
-          outputFaceBlendshapes: true,
-          runningMode: "VIDEO",
-          numFaces: 1,
-        });
+        // Load FilesetResolver once, share between both models
+        const [faceVision, poseVision] = await Promise.all([
+  FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm"
+  ),
+  FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm"
+  ),
+]);
+
+        const [faceLandmarker, poseLandmarker] = await Promise.all([
+          FaceLandmarker.createFromOptions(faceVision, {
+            baseOptions: {
+              modelAssetPath:
+                "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+            },
+            runningMode: "VIDEO",
+            numFaces: 1,
+            outputFaceBlendshapes: true,
+          }),
+          PoseLandmarker.createFromOptions(poseVision, {
+            baseOptions: {
+              modelAssetPath:
+                "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+            },
+            runningMode: "VIDEO",
+            numPoses: 1,
+          }),
+        ]);
 
         if (!isMounted) {
-          faceLandmarker.close?.();
+          faceLandmarker.close();
+          poseLandmarker.close();
           return;
         }
 
         faceLandmarkerRef.current = faceLandmarker;
+        poseLandmarkerRef.current = poseLandmarker;
         setIsLoaded(true);
-        console.log("✅ MediaPipe loaded");
+        console.log("✅ FaceLandmarker + PoseLandmarker loaded");
       } catch (err) {
-        setError(
-          err instanceof Error
-            ? err.message
-            : "Failed to load face landmark model"
-        );
+        console.error("❌ Failed to load MediaPipe models:", err);
       }
     };
 
-    loadFaceLandmarker();
+    loadModels();
 
     return () => {
       isMounted = false;
-      faceLandmarkerRef.current?.close?.();
+      faceLandmarkerRef.current?.close();
       faceLandmarkerRef.current = null;
+      poseLandmarkerRef.current?.close();
+      poseLandmarkerRef.current = null;
     };
   }, []);
 
-  const analyzeFrame = async (
-    videoElement: HTMLVideoElement,
+  const analyzeFrame = useCallback(
+    async (
+      video: HTMLVideoElement,
+      timestamp: number
+    ): Promise<MediaPipeFaceAnalysis | null> => {
+      const faceLandmarker = faceLandmarkerRef.current;
+      if (!faceLandmarker || !video || video.videoWidth === 0) return null;
+
+      try {
+        const result = faceLandmarker.detectForVideo(video, timestamp);
+        const landmarks = result.faceLandmarks?.[0];
+        const blendshapes = result.faceBlendshapes?.[0]?.categories;
+
+        if (!landmarks) {
+          return {
+            eyeContact: false,
+            lookingDown: false,
+            smiling: false,
+            faceVisible: false,
+          };
+        }
+
+        const nose = landmarks[1];
+        const eyeContact =
+          nose.x > 0.35 && nose.x < 0.65 &&
+          nose.y > 0.3 && nose.y < 0.7;
+
+        const smileLeft =
+          blendshapes?.find((b) => b.categoryName === "mouthSmileLeft")?.score ?? 0;
+        const smileRight =
+          blendshapes?.find((b) => b.categoryName === "mouthSmileRight")?.score ?? 0;
+        const smiling = (smileLeft + smileRight) / 2 > 0.4;
+
+        const lookingDown = nose.y > 0.6;
+
+        return { eyeContact, lookingDown, smiling, faceVisible: true };
+      } catch (err) {
+        console.warn("⚠️ Face detection error:", err);
+        return null;
+      }
+    },
+    []
+  );
+const analyzePosture = useCallback(
+  async (
+    video: HTMLVideoElement,
     timestamp: number
-  ): Promise<MediaPipeFaceAnalysis | null> => {
-    const faceLandmarker = faceLandmarkerRef.current;
-    if (!faceLandmarker) {
+  ): Promise<PostureAnalysis | null> => {
+    const poseLandmarker = poseLandmarkerRef.current;
+    if (!poseLandmarker || !video || video.videoWidth === 0) {
+      console.log("🚫 Posture skipped - no model or video");
       return null;
     }
 
     try {
-      const result = await faceLandmarker.detectForVideo(videoElement, timestamp);
-      if (!Array.isArray(result.faceLandmarks) || result.faceLandmarks.length === 0) {
+      const result = poseLandmarker.detectForVideo(video, timestamp);
+      
+      console.log("🦴 Raw pose result:", JSON.stringify(result?.poseLandmarks?.length));
+      
+      const landmarks = result?.poseLandmarks?.[0];
+
+      if (!landmarks) {
+        console.log("🚫 No landmarks detected at all");
         return null;
       }
 
-      const blendshapes = result.faceBlendshapes ?? [];
-      const scores = blendshapes
-        .flatMap((classification) => classification.categories)
-        .reduce<Record<string, number>>((acc, category) => {
-          if (category.categoryName) {
-            acc[category.categoryName] = category.score;
-          }
-          return acc;
-        }, {});
+      console.log("✅ Landmarks found:", landmarks.length);
+      
+      const leftShoulder = landmarks[11];
+      const rightShoulder = landmarks[12];
+      
+      console.log("👤 Left shoulder:", JSON.stringify(leftShoulder));
+      console.log("👤 Right shoulder:", JSON.stringify(rightShoulder));
 
-      const eyeLookInLeft = scores.eyeLookInLeft ?? 0;
-      const eyeLookInRight = scores.eyeLookInRight ?? 0;
-      const eyeLookOutLeft = scores.eyeLookOutLeft ?? 0;
-      const eyeLookOutRight = scores.eyeLookOutRight ?? 0;
-      const eyeLookDownLeft = scores.eyeLookDownLeft ?? 0;
-      const eyeLookDownRight = scores.eyeLookDownRight ?? 0;
-      const mouthSmileLeft = scores.mouthSmileLeft ?? 0;
-      const mouthSmileRight = scores.mouthSmileRight ?? 0;
+      if (!leftShoulder || !rightShoulder) return null;
 
-      const eyeContact =
-        eyeLookInLeft < 0.3 &&
-        eyeLookInRight < 0.3 &&
-        eyeLookOutLeft < 0.3 &&
-        eyeLookOutRight < 0.3;
-      const lookingDown = eyeLookDownLeft > 0.4 || eyeLookDownRight > 0.4;
-      const smiling = mouthSmileLeft > 0.3 && mouthSmileRight > 0.3;
+      const shoulderDiff = Math.abs(leftShoulder.y - rightShoulder.y);
+      console.log("📏 shoulderDiff:", shoulderDiff, "→ postureGood:", shoulderDiff < 0.15);
 
-      return {
-        eyeContact,
-        lookingDown,
-        smiling,
-        faceVisible: true,
-      };
+      return { postureGood: shoulderDiff < 0.15, shoulderDiff };
     } catch (err) {
-  console.error("MediaPipe frame error:", err);
-  return null;
-}
-  };
+      console.warn("⚠️ Posture detection error:", err);
+      return null;
+    }
+  },
+  []
+);
 
-  return { analyzeFrame, isLoaded, error } as const;
+  return { analyzeFrame, analyzePosture, isLoaded } as const;
 };

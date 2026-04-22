@@ -44,24 +44,34 @@ export const useWebcam = () => {
       });
 
       streamRef.current = stream;
+       setError(null);
+           const video = videoRef.current;
+
 
       // ✅ Set active FIRST so the video element renders in the DOM
       setIsActive(true);
       setError(null);
+
+      // Wait for the video element to be available and attach the stream
+      for (let i = 0; i < 20; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        const video = videoRef.current;
+        if (video) {
+          video.muted = true;
+          video.playsInline = true;
+          video.autoplay = true;
+          video.srcObject = stream;
+          await video.play().catch(() => {});
+          return;
+        }
+      }
+      console.error("useWebcam: <video> element never mounted");
 
     } catch (err) {
       setError(getFriendlyErrorMessage(err));
       setIsActive(false);
     }
   };
-
-  // ✅ Attach stream once video element exists in DOM
-  useEffect(() => {
-    if (isActive && streamRef.current && videoRef.current) {
-      videoRef.current.srcObject = streamRef.current;
-      videoRef.current.play().catch(() => {});
-    }
-  }, [isActive]);
 
   // Cleanup on unmount
   useEffect(() => {

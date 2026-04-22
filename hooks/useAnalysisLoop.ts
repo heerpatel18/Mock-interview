@@ -75,11 +75,20 @@ export const useAnalysisLoop = ({
     faceVisible: false,
   });
 
-  // ADD THIS - ref mirrors the prop so RAF closure is never stale
   const isActiveRef = useRef(isActive);
   useEffect(() => {
     isActiveRef.current = isActive;
   }, [isActive]);
+
+  // Stash functions in refs to avoid effect re-runs
+  const analyzeFrameRef = useRef(analyzeFrame);
+  const analyzePostureRef = useRef(analyzePosture);
+  useEffect(() => {
+    analyzeFrameRef.current = analyzeFrame;
+  }, [analyzeFrame]);
+  useEffect(() => {
+    analyzePostureRef.current = analyzePosture;
+  }, [analyzePosture]);
 
   const resetMetrics = () => {
     metricsRef.current = { ...INITIAL_METRICS };
@@ -93,12 +102,6 @@ export const useAnalysisLoop = ({
       postureGood: false,
       faceVisible: false,
     };
-    setLiveMetrics({
-      eyeContact: false,
-      smiling: false,
-      postureGood: false,
-      faceVisible: false,
-    });
     setLiveMetrics({
       eyeContact: false,
       smiling: false,
@@ -138,47 +141,73 @@ export const useAnalysisLoop = ({
   const lastAnalysisTimeRef = useRef<number | null>(null);
 
   useEffect(() => {
- const runFrame = async (timestamp: number) => {
-  const videoElement = videoRef.current;
-  if (!videoElement || !isActiveRef.current) {
-    if (Math.random() < 0.016) {
-      console.log("⏳ Loop waiting - isActive:", isActiveRef.current, "hasVideo:", !!videoElement);
-    }
-    rafRef.current = requestAnimationFrame(runFrame);
-    return;
-  }
-      console.log("✅ Loop active - running analysis check");
+    if (!isActive) return; // Don't start the loop until active
 
-      // ✅ Wait until webcam stream is actually readya
-if (
-  videoElement.readyState < 2 ||
-  videoElement.videoWidth === 0 ||
-  videoElement.videoHeight === 0
-) {
-  rafRef.current = requestAnimationFrame(runFrame);
-  return;
-}
+    const video = videoRef.current;
+    if (!video) return;
+
+    console.log("🟡 Waiting for video readiness...");
+
+    const runFrame = async (timestamp: number) => {
+      const videoElement = videoRef.current;
+
+      console.log("🔍 Loop check:", {
+        isActive: isActiveRef.current,
+        hasVideo: !!videoElement,
+        readyState: videoElement?.readyState,
+        width: videoElement?.videoWidth,
+        height: videoElement?.videoHeight,
+      });
+
+      if (!videoElement || !isActiveRef.current) {
+        rafRef.current = requestAnimationFrame(runFrame);
+        return;
+      }
+
+      // Wait until webcam stream is actually ready
+      if (
+        !videoElement ||
+        videoElement.readyState < 2 ||
+        videoElement.videoWidth === 0
+      ) {
+        // Try to recover video playback
+        videoElement?.play?.().catch(() => {});
+
+        rafRef.current = requestAnimationFrame(runFrame);
+        return;
+      }
 
       if (!startTimeRef.current) {
         startTimeRef.current = timestamp;
         lastSecondUpdateRef.current = timestamp;
         lastAnalysisTimeRef.current = timestamp;
+        console.log("� Analysis loop started", {
+          width: videoElement.videoWidth,
+          height: videoElement.videoHeight,
+        });
       }
 
-      // Analyze at a steady interval to keep CPU usage reasonable.
-      const shouldAnalyze = !lastAnalysisTimeRef.current || (timestamp - lastAnalysisTimeRef.current) >= 4000;
+      console.log("💓 Loop tick");
+
+      const shouldAnalyze =
+        !lastAnalysisTimeRef.current ||
+        timestamp - lastAnalysisTimeRef.current >= 2000;
 
       if (shouldAnalyze) {
+        if (videoElement.videoWidth === 0) {
+          console.warn("⚠️ Video width still 0 — skipping frame");
+        }
+
         lastAnalysisTimeRef.current = timestamp;
         frameCountRef.current += 1;
         const currentFrame = frameCountRef.current;
         const shouldAnalyzePosture = currentFrame % 3 === 0;
         console.log("📸 Running analysis", currentFrame);
 
-
         let postureGood = liveMetricsRef.current.postureGood;
+
         try {
-          const frameAnalysis = await analyzeFrame(videoElement, timestamp);
+          const frameAnalysis = await analyzeFrameRef.current(videoElement, timestamp);
           metricsRef.current.totalFrames += 1;
 
           if (frameAnalysis) {
@@ -216,7 +245,10 @@ if (
             }
 
             if (shouldAnalyzePosture) {
-              const postureAnalysis = await analyzePosture(videoElement, timestamp);
+              const postureAnalysis = await analyzePostureRef.current(
+                videoElement,
+                timestamp
+              );
               if (postureAnalysis) {
                 metricsRef.current.postureFrames += 1;
                 if (postureAnalysis.postureGood) {
@@ -268,21 +300,44 @@ if (
 
       if (timestamp - lastSecondUpdateRef.current >= 1000) {
         lastSecondUpdateRef.current = timestamp;
-        setSessionSeconds(Math.floor((timestamp - (startTimeRef.current ?? timestamp)) / 1000));
+        setSessionSeconds(
+          Math.floor(
+            (timestamp - (startTimeRef.current ?? timestamp)) / 1000
+          )
+        );
       }
 
       rafRef.current = requestAnimationFrame(runFrame);
     };
 
-    rafRef.current = requestAnimationFrame(runFrame);
+    const waitForVideo = async () => {
+      const videoElement = videoRef.current;
+      if (!videoElement) return;
 
-return () => {
-  if (rafRef.current !== null) {
-    cancelAnimationFrame(rafRef.current);
-    rafRef.current = null;
-  }
-};
-}, [analyzeFrame, analyzePosture, videoRef]);
+      return new Promise<void>((resolve) => {
+        const check = () => {
+          if (videoElement.videoWidth > 0 && videoElement.readyState >= 2) {
+            console.log("✅ Video is ready for analysis");
+            resolve();
+          } else {
+            requestAnimationFrame(check);
+          }
+        };
+        check();
+      });
+    };
+
+    waitForVideo().then(() => {
+      rafRef.current = requestAnimationFrame(runFrame);
+    });
+
+    return () => {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+    };
+  }, [isActive, videoRef]);
 
   return {
     metrics: metricsRef.current,
