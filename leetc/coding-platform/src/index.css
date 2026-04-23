@@ -1,0 +1,54 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Dark Theme Background with Grid Pattern */
+:root {
+  --color-dark-100: #020408;
+  --color-dark-200: #27282f;
+  --color-dark-300: #242633;
+  --color-light-100: #d6e0ff;
+  --color-light-400: #6870a6;
+  --color-primary-100: #dddfff;
+  --color-primary-200: #cac5fe;
+  --color-success-100: #49de50;
+  --color-success-200: #42c748;
+}
+
+body {
+  @apply bg-gradient-to-b from-[#1A1C20] to-[#08090D] text-white min-h-screen;
+  background-image: 
+    linear-gradient(rgba(106, 112, 166, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(106, 112, 166, 0.08) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+* {
+  @apply border-gray-700;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  @apply text-white;
+}
+
+p {
+  @apply text-gray-300;
+}
+
+a {
+  @apply text-blue-400 hover:text-blue-300 transition-colors;
+}
+
+/* Scrollbar Styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-gray-900/50;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-gray-700 hover:bg-gray-600 rounded;
+}
