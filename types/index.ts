@@ -88,6 +88,7 @@ export interface AgentProps {
   type: string;
   questions?: string[];
   language?: "en" | "hi";
+  role: string;
 }
 
 export interface InterviewCardProps {

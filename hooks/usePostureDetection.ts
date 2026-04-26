@@ -6,6 +6,11 @@ export type PostureAnalysis = {
   shoulderDiff: number;
 };
 
+type PoseDetectionResultCompat = {
+  landmarks?: Array<Array<{ x: number; y: number; z?: number; visibility?: number }>>;
+  poseLandmarks?: Array<Array<{ x: number; y: number; z?: number; visibility?: number }>>;
+};
+
 export const usePostureDetection = () => {
   const poseLandmarkerRef = useRef<PoseLandmarker | null>(null);
   const [isLoaded, setIsLoaded] = useState(false);
@@ -40,9 +45,9 @@ export const usePostureDetection = () => {
 
         poseLandmarkerRef.current = poseLandmarker;
         setIsLoaded(true);
-        console.log("✅ PoseLandmarker loaded");
+        console.log("PoseLandmarker loaded");
       } catch (err) {
-        console.error("❌ Failed to load PoseLandmarker", err);
+        console.error("Failed to load PoseLandmarker", err);
       }
     };
 
@@ -62,11 +67,7 @@ export const usePostureDetection = () => {
     ): Promise<PostureAnalysis | null> => {
       const poseLandmarker = poseLandmarkerRef.current;
 
-      if (
-        !poseLandmarker ||
-        !videoElement ||
-        videoElement.videoWidth === 0
-      ) {
+      if (!poseLandmarker || !videoElement || videoElement.videoWidth === 0) {
         return null;
       }
 
@@ -74,10 +75,10 @@ export const usePostureDetection = () => {
         const result = poseLandmarker.detectForVideo(
           videoElement,
           timestamp
-        );
+        ) as PoseDetectionResultCompat;
 
-        // ✅ FIX: access first pose
-        const landmarks = result?.poseLandmarks?.[0];
+        const poseSets = result.landmarks ?? result.poseLandmarks ?? [];
+        const landmarks = poseSets[0];
 
         if (!landmarks || landmarks.length < 13) {
           return null;
@@ -90,16 +91,14 @@ export const usePostureDetection = () => {
           return null;
         }
 
-        const shoulderDiff = Math.abs(
-          leftShoulder.y - rightShoulder.y
-        );
+        const shoulderDiff = Math.abs(leftShoulder.y - rightShoulder.y);
 
         return {
           postureGood: shoulderDiff < 0.05,
           shoulderDiff,
         };
       } catch (err) {
-        console.warn("⚠️ Posture detection error:", err);
+        console.warn("Posture detection error:", err);
         return null;
       }
     },

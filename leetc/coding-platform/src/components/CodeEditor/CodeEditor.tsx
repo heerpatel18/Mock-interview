@@ -7,6 +7,7 @@ interface CodeEditorProps {
   language: string;
   onCodeChange: (code: string) => void;
   onLanguageChange: (language: string) => void;
+  isFrozen?: boolean;
 }
 
 const defaultCode = {
@@ -47,7 +48,8 @@ const CodeEditor: React.FC<CodeEditorProps> = ({
   initialCode,
   language,
   onCodeChange,
-  onLanguageChange
+  onLanguageChange,
+  isFrozen = false
 }) => {
   const [code, setCode] = useState(initialCode || defaultCode[language as keyof typeof defaultCode] || '');
 
@@ -102,7 +104,7 @@ const CodeEditor: React.FC<CodeEditorProps> = ({
         </select>
       </div>
 
-      <div className="h-96">
+      <div className="h-[360px] min-h-[360px] lg:h-[42vh] lg:min-h-[380px]">
         <Editor
           height="100%"
           language={getMonacoLanguage(language)}
@@ -122,6 +124,7 @@ const CodeEditor: React.FC<CodeEditorProps> = ({
             folding: true,
             lineDecorationsWidth: 10,
             lineNumbersMinChars: 3,
+            readOnly: isFrozen,
             scrollbar: {
               vertical: 'visible',
               horizontal: 'visible',

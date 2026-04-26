@@ -1,5 +1,4 @@
 import React, { useState } from 'react';
-import { Hint } from '../../types/types';
 import { Lightbulb, ChevronDown, ChevronUp } from 'lucide-react';
 
 interface HintSystemProps {
@@ -25,38 +24,37 @@ const HintSystem: React.FC<HintSystemProps> = ({ hints, solution }) => {
   };
 
   return (
-    <div className="bg-gradient-to-b from-[#27282f] to-[#242633] rounded-lg shadow-xl p-6 border border-gray-700">
-      <div className="flex items-center mb-4">
-        <Lightbulb className="h-5 w-5 text-yellow-400 mr-2" />
+    <div className="max-h-[28vh] overflow-y-auto rounded-lg border border-gray-700 bg-gradient-to-b from-[#27282f] to-[#242633] p-6 shadow-xl">
+      <div className="mb-4 flex items-center">
+        <Lightbulb className="mr-2 h-5 w-5 text-yellow-400" />
         <h2 className="text-lg font-semibold text-white">Hints & Solution</h2>
       </div>
 
       <div className="space-y-4">
         {hints.map((hint, index) => (
-          <div key={index} className="border border-gray-700 rounded-lg p-4 hover:border-gray-600 transition-colors">
+          <div
+            key={index}
+            className="rounded-lg border border-gray-700 p-4 transition-colors hover:border-gray-600"
+          >
             <button
               onClick={() => handleRevealHint(index)}
-              className="w-full flex justify-between items-center text-left"
+              className="flex w-full items-center justify-between text-left"
             >
-              <span className="font-medium text-white">
-                Hint #{index + 1}
-              </span>
+              <span className="font-medium text-white">Hint #{index + 1}</span>
               {revealedHints.includes(index) ? (
                 <ChevronUp className="h-4 w-4 text-gray-400" />
               ) : (
                 <ChevronDown className="h-4 w-4 text-gray-400" />
               )}
             </button>
-            {revealedHints.includes(index) && (
-              <p className="mt-2 text-gray-300">{hint}</p>
-            )}
+            {revealedHints.includes(index) && <p className="mt-2 text-gray-300">{hint}</p>}
           </div>
         ))}
 
-        <div className="border-t border-gray-700 pt-4 mt-4">
+        <div className="mt-4 border-t border-gray-700 pt-4">
           <button
             onClick={() => setShowSolution(!showSolution)}
-            className="w-full flex justify-between items-center text-left"
+            className="flex w-full items-center justify-between text-left"
           >
             <span className="font-medium text-white">Solution</span>
             {showSolution ? (
@@ -72,11 +70,21 @@ const HintSystem: React.FC<HintSystemProps> = ({ hints, solution }) => {
                 <p className="mt-1 text-gray-400">{solution.approach}</p>
               </div>
               <div>
-                <h3 className="font-medium text-gray-300">Time Complexity:</h3>
+                <h3 className="font-medium text-gray-300">
+                  Reference Time Complexity
+                  <span className="ml-1 text-xs font-normal text-gray-500">
+                    (for guidance only, not part of the evaluation criteria)
+                  </span>
+                </h3>
                 <p className="mt-1 text-gray-400">{solution.complexity.time}</p>
               </div>
               <div>
-                <h3 className="font-medium text-gray-300">Space Complexity:</h3>
+                <h3 className="font-medium text-gray-300">
+                  Reference Space Complexity
+                  <span className="ml-1 text-xs font-normal text-gray-500">
+                    (for guidance only, not part of the evaluation criteria)
+                  </span>
+                </h3>
                 <p className="mt-1 text-gray-400">{solution.complexity.space}</p>
               </div>
               <div>

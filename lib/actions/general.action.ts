@@ -270,7 +270,11 @@ SCORE REMINDER: If candidate explained concepts clearly with proper terminology,
 
     console.log("✅ Feedback saved:", feedbackRef.id);
 
-    return { success: true, feedbackId: feedbackRef.id };
+    return {
+      success: true,
+      feedbackId: feedbackRef.id,
+      feedback: { id: feedbackRef.id, ...feedback },
+    };
 
   } catch (error: any) {
     console.error("❌ Error:", error);

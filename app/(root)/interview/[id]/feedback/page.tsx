@@ -16,16 +16,17 @@ import { getCurrentUser } from "@/lib/actions/auth.action";
 
 
 const Feedback = async ({ params }: RouteParams) => {
-  const { id } = await params; // extract int id =  interview document id
-  const user = await getCurrentUser(); // gets name and id 
+  const { id } = await params;
+  const user = await getCurrentUser();
+  if (!user?.id) redirect("/");
 
-  const interview = await getInterviewById(id); // fetch int 
+  const interview = await getInterviewById(id);
   if (!interview) redirect("/");
 
   const feedback = await getFeedbackByInterviewId({
     interviewId: id,
-    userId: user?.id!,
-  });  
+    userId: user.id,
+  });
 
   // ui of feedback
   return (

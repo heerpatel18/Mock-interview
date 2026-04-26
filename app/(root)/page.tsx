@@ -68,6 +68,27 @@ async function Home() {
         />
       </section>
 
+      <section className="card-cta mt-8">
+        <div className="flex flex-col gap-6 max-w-xl">
+          <h2>Coding Workspace</h2>
+          <p className="text-lg">
+            <p className="text-lg">
+  Practice DSA in a focused LeetCode-style environment. Solve problems, write code in the editor, and run test cases instantly.
+</p>
+          </p>
+          <Button asChild className="btn-primary max-sm:w-full">
+            <Link href="/coding">Start Coding</Link>
+          </Button>
+        </div>
+        <Image
+          src="/tech.svg"
+          alt="Coding and tech stack"
+          width={400}
+          height={400}
+          className="max-sm:hidden"
+        />
+      </section>
+
       <section className="flex flex-col gap-6 mt-8">
         <h2>Your Interviews</h2>
 
@@ -92,7 +113,15 @@ async function Home() {
       </section>
 
       <section className="flex flex-col gap-6 mt-8">
-        <h2>Take an Interview</h2>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2>Performance Hub</h2>
+            <p className="text-sm text-gray-600">View analytics of  your past interviews and continue practicing.</p>
+          </div>
+          <Button asChild>
+            <Link href="/analytics">View Analytics</Link>
+          </Button>
+        </div>
 
         <div className="interviews-section"> 
           {hasUpcomingInterviews ? (
@@ -109,7 +138,7 @@ async function Home() {
               />
             ))
           ) : (
-            <p>There are no interviews available</p>
+            <p></p>
           )}
         </div>
       </section>

@@ -18,16 +18,17 @@ const InterviewDetails = async ({ params, searchParams }: { params: Promise<{ id
   const { id } = await params;
   const search = await searchParams;
 
-  const user = await getCurrentUser(); // Get currently logged-in user from server-side auth
+  const user = await getCurrentUser();
+  if (!user?.id) redirect("/");
 
-  const interview = await getInterviewById(id); //Fetch interview document(+ ques) from Firestore using the ID
+  const interview = await getInterviewById(id);
   if (!interview) redirect("/");
   const lang = interview.language === "hi" || search?.lang === "hi" ? "hi" : "en";
 
   const feedback = await getFeedbackByInterviewId({
     interviewId: id,
-    userId: user?.id!,
-  }); // Check if feedback already exists for interview and user. If so, pass feedback ID to Agent for update instead of creating new feedback.
+    userId: user.id,
+  });
 
   
     // Renders interview details and Agent component
@@ -62,13 +63,14 @@ const InterviewDetails = async ({ params, searchParams }: { params: Promise<{ id
       </div>
 
       <Agent
-        userName={user?.name!}
-        userId={user?.id}// Pass user ID (for saving answers/feedback)
-        interviewId={id} // Pass interview ID (for fetching questions and saving feedback)
-        type="interview"//  Pass type to Agent so it knows this is an interview (not a different flow like feedback review)
-        questions={interview.questions}// Array of generated questions
-        feedbackId={feedback?.id} // Existing feedback ID (if any)
-        language={lang} // Interview language (en or hi)
+        userName={user.name}
+        userId={user.id}
+        interviewId={id}
+        type="interview"
+        questions={interview.questions}
+        feedbackId={feedback?.id}
+        language={lang}
+        role={interview.role}
       />
     </>
   );

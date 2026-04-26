@@ -1,6 +1,7 @@
 // Import the functions you need
 import { initializeApp } from "firebase/app";
-import { getAuth } from "firebase/auth";          // ✅ ADD THIS
+import { getAuth } from "firebase/auth";
+import { getFirestore } from "firebase/firestore";
 import { getAnalytics } from "firebase/analytics";
 
 const firebaseConfig = {
@@ -21,5 +22,6 @@ if (typeof window !== "undefined") {
   analytics = getAnalytics(app);
 }
 
-// ✅ Now this will work
+// ✅ Export auth and firestore
 export const auth = getAuth(app);
+export const firebaseDb = getFirestore(app);

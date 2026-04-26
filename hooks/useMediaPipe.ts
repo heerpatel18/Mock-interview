@@ -17,6 +17,11 @@ export type PostureAnalysis = {
   shoulderDiff: number;
 };
 
+type PoseDetectionResultCompat = {
+  landmarks?: Array<Array<{ x: number; y: number; z?: number; visibility?: number }>>;
+  poseLandmarks?: Array<Array<{ x: number; y: number; z?: number; visibility?: number }>>;
+};
+
 export const useMediaPipe = () => {
   const faceLandmarkerRef = useRef<FaceLandmarker | null>(null);
   const poseLandmarkerRef = useRef<PoseLandmarker | null>(null);
@@ -29,18 +34,12 @@ export const useMediaPipe = () => {
       try {
         if (typeof window === "undefined") return;
 
-        // Load FilesetResolver once, share between both models
-        const [faceVision, poseVision] = await Promise.all([
-  FilesetResolver.forVisionTasks(
-    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm"
-  ),
-  FilesetResolver.forVisionTasks(
-    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm"
-  ),
-]);
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm"
+        );
 
         const [faceLandmarker, poseLandmarker] = await Promise.all([
-          FaceLandmarker.createFromOptions(faceVision, {
+          FaceLandmarker.createFromOptions(vision, {
             baseOptions: {
               modelAssetPath:
                 "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
@@ -49,7 +48,7 @@ export const useMediaPipe = () => {
             numFaces: 1,
             outputFaceBlendshapes: true,
           }),
-          PoseLandmarker.createFromOptions(poseVision, {
+          PoseLandmarker.createFromOptions(vision, {
             baseOptions: {
               modelAssetPath:
                 "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
@@ -68,9 +67,9 @@ export const useMediaPipe = () => {
         faceLandmarkerRef.current = faceLandmarker;
         poseLandmarkerRef.current = poseLandmarker;
         setIsLoaded(true);
-        console.log("✅ FaceLandmarker + PoseLandmarker loaded");
+        console.log("FaceLandmarker and PoseLandmarker loaded");
       } catch (err) {
-        console.error("❌ Failed to load MediaPipe models:", err);
+        console.error("Failed to load MediaPipe models:", err);
       }
     };
 
@@ -109,8 +108,7 @@ export const useMediaPipe = () => {
 
         const nose = landmarks[1];
         const eyeContact =
-          nose.x > 0.35 && nose.x < 0.65 &&
-          nose.y > 0.3 && nose.y < 0.7;
+          nose.x > 0.35 && nose.x < 0.65 && nose.y > 0.3 && nose.y < 0.7;
 
         const smileLeft =
           blendshapes?.find((b) => b.categoryName === "mouthSmileLeft")?.score ?? 0;
@@ -122,56 +120,58 @@ export const useMediaPipe = () => {
 
         return { eyeContact, lookingDown, smiling, faceVisible: true };
       } catch (err) {
-        console.warn("⚠️ Face detection error:", err);
+        console.warn("Face detection error:", err);
         return null;
       }
     },
     []
   );
-const analyzePosture = useCallback(
-  async (
-    video: HTMLVideoElement,
-    timestamp: number
-  ): Promise<PostureAnalysis | null> => {
-    const poseLandmarker = poseLandmarkerRef.current;
-    if (!poseLandmarker || !video || video.videoWidth === 0) {
-      console.log("🚫 Posture skipped - no model or video");
-      return null;
-    }
 
-    try {
-      const result = poseLandmarker.detectForVideo(video, timestamp);
-      
-      console.log("🦴 Raw pose result:", JSON.stringify(result?.poseLandmarks?.length));
-      
-      const landmarks = result?.poseLandmarks?.[0];
-
-      if (!landmarks) {
-        console.log("🚫 No landmarks detected at all");
+  const analyzePosture = useCallback(
+    async (
+      video: HTMLVideoElement,
+      timestamp: number
+    ): Promise<PostureAnalysis | null> => {
+      const poseLandmarker = poseLandmarkerRef.current;
+      if (!poseLandmarker || !video || video.videoWidth === 0) {
+        console.log("Posture skipped: model or video not ready");
         return null;
       }
 
-      console.log("✅ Landmarks found:", landmarks.length);
-      
-      const leftShoulder = landmarks[11];
-      const rightShoulder = landmarks[12];
-      
-      console.log("👤 Left shoulder:", JSON.stringify(leftShoulder));
-      console.log("👤 Right shoulder:", JSON.stringify(rightShoulder));
+      try {
+        const result = poseLandmarker.detectForVideo(
+          video,
+          timestamp
+        ) as PoseDetectionResultCompat;
+        const poseSets = result.landmarks ?? result.poseLandmarks ?? [];
+        const landmarks = poseSets[0];
 
-      if (!leftShoulder || !rightShoulder) return null;
+        if (!landmarks || landmarks.length < 13) {
+          console.log("No usable pose landmarks detected");
+          return null;
+        }
 
-      const shoulderDiff = Math.abs(leftShoulder.y - rightShoulder.y);
-      console.log("📏 shoulderDiff:", shoulderDiff, "→ postureGood:", shoulderDiff < 0.15);
+        const leftShoulder = landmarks[11];
+        const rightShoulder = landmarks[12];
 
-      return { postureGood: shoulderDiff < 0.15, shoulderDiff };
-    } catch (err) {
-      console.warn("⚠️ Posture detection error:", err);
-      return null;
-    }
-  },
-  []
-);
+        if (!leftShoulder || !rightShoulder) {
+          console.log("Shoulder landmarks missing in pose result");
+          return null;
+        }
+
+        const shoulderDiff = Math.abs(leftShoulder.y - rightShoulder.y);
+
+        return {
+          postureGood: shoulderDiff < 0.15,
+          shoulderDiff,
+        };
+      } catch (err) {
+        console.warn("Posture detection error:", err);
+        return null;
+      }
+    },
+    []
+  );
 
   return { analyzeFrame, analyzePosture, isLoaded } as const;
 };

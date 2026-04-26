@@ -15,12 +15,22 @@
   --color-success-200: #42c748;
 }
 
+/* 🔥 FIX: Ensure full viewport usage */
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow-x: hidden;
+}
+
 body {
-  @apply bg-gradient-to-b from-[#1A1C20] to-[#08090D] text-white min-h-screen;
+  @apply bg-gradient-to-b from-[#1A1C20] to-[#08090D] text-white;
   background-image: 
     linear-gradient(rgba(106, 112, 166, 0.08) 1px, transparent 1px),
     linear-gradient(90deg, rgba(106, 112, 166, 0.08) 1px, transparent 1px);
   background-size: 40px 40px;
+  background-attachment: fixed;
 }
 
 * {
@@ -51,4 +61,19 @@ a {
 
 ::-webkit-scrollbar-thumb {
   @apply bg-gray-700 hover:bg-gray-600 rounded;
+}
+
+/* 🔥 Hide scrollbar while keeping scroll functionality */
+.hide-scrollbar {
+  -ms-overflow-style: none; /* IE and Edge */
+  scrollbar-width: none; /* Firefox */
+}
+
+.hide-scrollbar::-webkit-scrollbar {
+  display: none; /* Chrome, Safari and Opera */
+}
+
+/* 🔥 FIX: Smooth scrolling behavior */
+html {
+  scroll-behavior: smooth;
 }

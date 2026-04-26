@@ -149,7 +149,1293 @@ Current path:
 - During interview, transcript messages are collected in `components/Agent.tsx`.
 - On call finish, transcript is sent to `createFeedback()` in `lib/actions/general.action.ts`.
 
+
+
+
+
+
+
+
+
+
+
+
+
 ---
+
+## 🔷 NEW LOCAL ANALYTICS ARCHITECTURE – COMPLETE FLOW
+
+This new layer adds a local IndexedDB analytics cache that complements Firestore feedback. All interview attempts are persisted locally with no overwrites, enabling performance tracking, leaderboards, and multi-attempt comparisons.
+
+---
+
+### COMPLETE END-TO-END ANALYTICS FLOW
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ USER COMPLETES INTERVIEW                                 │
+│                                                          │
+│ Flow: app/(root)/interview/[id]/page.tsx                │
+│       → components/Agent.tsx                             │
+│       → Voice interview with Vapi                        │
+│       → Call finishes, transcript collected             │
+└──────────────────────────────┬───────────────────────────┘
+                               ↓
+
+┌──────────────────────────────────────────────────────────┐
+│ STEP 1: FEEDBACK GENERATION (Server Action)             │
+│                                                          │
+│ File: lib/actions/general.action.ts                     │
+│ Function: createFeedback(params)                        │
+│                                                          │
+│ INPUT:                                                   │
+│ {                                                        │
+│   interviewId: string;                                  │
+│   userId: string;                                       │
+│   transcript: SavedMessage[];                           │
+│   feedbackId?: string;                                  │
+│   videoSummary: VideoMetrics;                           │
+│ }                                                        │
+│                                                          │
+│ PROCESSING:                                              │
+│ 1. Format transcript into conversation text             │
+│ 2. Fetch interview doc from Firestore by interviewId   │
+│ 3. Extract jobDescription from interview doc            │
+│ 4. Build Groq prompt with:                              │
+│    - Formatted transcript                               │
+│    - Job description context                            │
+│    - Video metrics (posture, eye contact, etc.)         │
+│ 5. Call Groq LLM to generate:                           │
+│    - Overall score (0-100)                              │
+│    - Category scores (7 categories):                    │
+│      • Confidence & Clarity                             │
+│      • Technical Knowledge                              │
+│      • Role Fit                                          │
+│      • Cultural Fit                                     │
+│      • Communication Skills                             │
+│      • Problem-Solving                                  │
+│    - Detailed feedback text                             │
+│                                                          │
+│ OUTPUT:                                                  │
+│ {                                                        │
+│   success: boolean;                                     │
+│   feedbackId: string;                                   │
+│   feedback?: {                                          │
+│     totalScore: number;                                 │
+│     categoryScores: [                                   │
+│       { name: string; score: number },                 │
+│       ...                                                │
+│     ];                                                  │
+│     feedbackText: string;                               │
+│   };                                                    │
+│   error?: string;                                       │
+│ }                                                        │
+│                                                          │
+│ Firestore Operations:                                   │
+│ • Write feedback doc to feedbacks collection           │
+│ • Store with structure:                                 │
+│   {                                                     │
+│     userId, interviewId, totalScore,                   │
+│     categoryScores, feedbackText, timestamp            │
+│   }                                                     │
+└──────────────────────────────┬───────────────────────────┘
+                               ↓
+
+┌──────────────────────────────────────────────────────────┐
+│ STEP 2: EXTRACT & NORMALIZE FEEDBACK SCORES             │
+│                                                          │
+│ File: components/Agent.tsx                              │
+│ Function: handleGenerateFeedback() (useEffect hook)     │
+│                                                          │
+│ WHEN: callStatus === 'FINISHED' && type !== 'generate'  │
+│       && messages.length > 0 && !feedbackGeneratedRef   │
+│                                                          │
+│ PROCESSING:                                              │
+│ 1. Receive feedback object from createFeedback()        │
+│ 2. Check if feedback exists and has categoryScores     │
+│ 3. Create normalization function:                       │
+│                                                          │
+│    normalizeName(name) = name.toLowerCase()             │
+│                               .replace(/[^a-z0-9]/g, "")│
+│                                                          │
+│    Converts:                                             │
+│    "Confidence&Clarity" → "confidenceclarity"           │
+│    "Technical Knowledge" → "technicalknowledge"         │
+│    "Role Fit" → "rolefit"                               │
+│    "Cultural Fit" → "culturalfit"                       │
+│    "Communication Skills" → "communicationskills"       │
+│    "Problem-Solving" → "problemsolving"                 │
+│                                                          │
+│ 4. Create score extraction function:                    │
+│                                                          │
+│    getScore(categoryName) {                             │
+│      return feedback.categoryScores.find(c =>           │
+│        normalizeName(c.name) ===                        │
+│        normalizeName(categoryName)                       │
+│      )?.score ?? 0                                      │
+│    }                                                    │
+│                                                          │
+│ 5. Extract all 7 category scores:                       │
+│    - confidenceClarity = getScore("Confidence&Clarity") │
+│    - technicalKnowledge = getScore("TechnicalKnowledge")│
+│    - roleFit = getScore("RoleFit")                      │
+│    - culturalFit = getScore("CulturalFit")              │
+│    - communication = getScore("CommunicationSkills")    │
+│    - problemSolving = getScore("Problem-Solving")       │
+│    - overallImpression = feedback.totalScore            │
+│                                                          │
+│ OUTPUT: Normalized scores object ready for IndexedDB    │
+└──────────────────────────────┬───────────────────────────┘
+                               ↓
+
+┌──────────────────────────────────────────────────────────┐
+│ STEP 3: SAVE INTERVIEW ATTEMPT TO IndexedDB             │
+│                                                          │
+│ File: components/Agent.tsx (same useEffect)             │
+│ Function: saveInterviewAttempt()                        │
+│                                                          │
+│ LOCATION: Within try-catch after feedback generation    │
+│ Called from: lib/utils/db.ts                            │
+│                                                          │
+│ INPUT OBJECT:                                            │
+│ {                                                        │
+│   attemptId: crypto.randomUUID(),  // Unique per run    │
+│   interviewId: normalizeInterviewId(role, language),    │
+│   userId: userId,                                       │
+│   role: role,                      // e.g., "SDE",      │
+│   language: (language || "en"),    // "en" or "hi"      │
+│   createdAt: new Date().toISOString(),                  │
+│   scores: {                                              │
+│     overallImpression: feedback.totalScore,             │
+│     confidenceClarity: 78,                              │
+│     technicalKnowledge: 82,                             │
+│     roleFit: 75,                                        │
+│     culturalFit: 80,                                    │
+│     communication: 79,                                  │
+│     problemSolving: 81                                  │
+│   }                                                     │
+│ }                                                       │
+│                                                          │
+│ ERROR HANDLING:                                          │
+│ try {                                                   │
+│   await saveInterviewAttempt({...})                     │
+│ } catch (saveError) {                                   │
+│   console.warn("⚠️ Local analytics save failed:", err)  │
+│   // Continue - don't break user experience             │
+│ }                                                       │
+└──────────────────────────────┬───────────────────────────┘
+                               ↓
+
+╔══════════════════════════════════════════════════════════╗
+║ STEP 4: INDEXEDDB LOCAL STORAGE LAYER                   ║
+║                                                          ║
+║ File: utils/db.ts                                       ║
+║                                                          ║
+║ DATABASE STRUCTURE:                                      ║
+║ ─────────────────────                                    ║
+║ Database Name: 'interview_platform'                     ║
+║ Version: 1                                              ║
+║                                                          ║
+║ Table: 'interview_attempts'                             ║
+║ ┌─────────────────────────────────────────┐             ║
+║ │ Key: 'attemptId' (Primary Key)          │             ║
+║ │ Index 1: 'interviewId' (Grouping)       │             ║
+║ │ Index 2: 'userId' (User filtering)      │             ║
+║ │ Index 3: 'createdAt' (Sorting)          │             ║
+║ └─────────────────────────────────────────┘             ║
+║                                                          ║
+║ TABLE SCHEMA (InterviewAttempt):                        ║
+║ ──────────────────────────────────────────              ║
+║ {                                                        ║
+║   attemptId: string;        // UUID, primary key        ║
+║   interviewId: string;      // Normalized from role+lang║
+║   userId: string;           // Firebase UID              ║
+║   role: string;             // e.g., "SDE", "FE", "BE"  ║
+║   language: "en" | "hi";    // Interview language       ║
+║   createdAt: string;        // ISO timestamp            ║
+║   scores: {                 // All scores 0-100         ║
+║     overallImpression: number;                          ║
+║     confidenceClarity: number;                          ║
+║     technicalKnowledge: number;                         ║
+║     roleFit: number;                                    ║
+║     culturalFit: number;                                ║
+║     communication: number;                              ║
+║     problemSolving: number;                             ║
+║   }                                                     ║
+║ }                                                        ║
+║                                                          ║
+║ DEXIE INITIALIZATION:                                   ║
+║ ──────────────────────                                  ║
+║ import Dexie from 'dexie'                              ║
+║                                                          ║
+║ class InterviewDB extends Dexie {                       ║
+║   interview_attempts!: Table<InterviewAttempt>         ║
+║                                                          ║
+║   constructor() {                                       ║
+║     super('interview_platform')                        ║
+║     this.version(1).stores({                            ║
+║       interview_attempts:                               ║
+║         '++attemptId, interviewId, userId, createdAt'   ║
+║     })                                                  ║
+║   }                                                     ║
+║ }                                                        ║
+║                                                          ║
+║ OPERATIONS:                                             ║
+║ ──────────                                              ║
+║                                                          ║
+║ A) saveInterviewAttempt(attempt: InterviewAttempt)     ║
+║    ─────────────────────────────────────────────────   ║
+║    Dexie operation: db.interview_attempts.add(attempt) ║
+║    Returns: Promise<string> (attemptId)                ║
+║    Side effects: Persists to IndexedDB                 ║
+║    Error: Rejects if attemptId already exists (rare)   ║
+║                                                          ║
+║ B) getInterviewAttempts(                                ║
+║      userId: string,                                    ║
+║      interviewId?: string,                             ║
+║      filters?: FilterOptions                           ║
+║    )                                                    ║
+║    ─────────────────────────────────────────────────   ║
+║    Dexie operations:                                    ║
+║    1. db.interview_attempts                            ║
+║       .where('userId').equals(userId)                  ║
+║       .toArray()                                        ║
+║                                                          ║
+║    2. If interviewId provided:                          ║
+║       filter(a => a.interviewId === interviewId)       ║
+║                                                          ║
+║    3. If language filter: filter by language           ║
+║                                                          ║
+║    4. If score range filter:                            ║
+║       filter(a => a.scores.overallImpression >=...     ║
+║                  && <= ...)                            ║
+║                                                          ║
+║    5. Sort by createdAt descending                      ║
+║                                                          ║
+║    Returns: Promise<InterviewAttempt[]>                ║
+║                                                          ║
+║ C) normalizeInterviewId(role: string, lang: string)    ║
+║    ─────────────────────────────────────────────────   ║
+║    Returns normalized key for grouping                 ║
+║    Format: `{role}_{language}`                         ║
+║    Examples:                                            ║
+║    - normalizeInterviewId("SDE", "en") → "sde_en"      ║
+║    - normalizeInterviewId("FE", "hi") → "fe_hi"        ║
+║    - normalizeInterviewId("BE", "en") → "be_en"        ║
+║                                                          ║
+║    This ensures same role/language combo always        ║
+║    groups together in analytics view                   ║
+║                                                          ║
+║ NO OVERWRITES:                                          ║
+║ Each attempt gets a unique UUID (attemptId)            ║
+║ Previous attempts remain in database                   ║
+║ New runs append, never replace                         ║
+╚════════════════════════┬═════════════════════════════════╝
+                         ↓
+
+┌──────────────────────────────────────────────────────────┐
+│ STEP 5: REDIRECT & DISPLAY FEEDBACK                     │
+│                                                          │
+│ File: components/Agent.tsx (same useEffect)             │
+│                                                          │
+│ After successful save:                                   │
+│ router.push(`/interview/${interviewId}/feedback`)       │
+│                                                          │
+│ User sees:                                               │
+│ • Feedback scores on /interview/[id]/feedback/page.tsx  │
+│ • Firestore feedback (detailed response)                │
+│ • Navigation link to /analytics added to dashboard      │
+└──────────────────────────────┬───────────────────────────┘
+                               ↓
+
+╔══════════════════════════════════════════════════════════╗
+║ STEP 6: ANALYTICS DASHBOARD – LEADERBOARD LOGIC         ║
+║                                                          ║
+║ File: app/(root)/analytics/page.tsx                     ║
+║                                                          ║
+║ PAGE FLOW:                                               ║
+║ ──────────                                              ║
+║                                                          ║
+║ 1. Page loads (client component with 'use client')      ║
+║ 2. useEffect on mount: call loadAnalytics()             ║
+║ 3. loadAnalytics():                                      ║
+║    - Get current userId from auth context              ║
+║    - Call getInterviewAttempts(userId)                  ║
+║    - Returns all attempts for current user             ║
+║                                                          ║
+║ 4. GROUP BY INTERVIEW ID:                               ║
+║    ─────────────────────                                ║
+║    const grouped = attempts.reduce((acc, attempt) => {  ║
+║      const key = attempt.interviewId                    ║
+║      if (!acc[key]) acc[key] = []                       ║
+║      acc[key].push(attempt)                             ║
+║      return acc                                         ║
+║    }, {})                                               ║
+║                                                          ║
+║    Result structure:                                    ║
+║    {                                                    ║
+║      "sde_en": [attempt1, attempt2, attempt3],          ║
+║      "fe_hi": [attempt1, attempt2],                     ║
+║      "be_en": [attempt1]                                ║
+║    }                                                    ║
+║                                                          ║
+║ 5. COMPUTE GROUP ANALYTICS:                             ║
+║    ─────────────────────────                            ║
+║    For each interviewId group:                          ║
+║                                                          ║
+║    A) SORT by overallImpression descending:             ║
+║       sortedAttempts = group.sort((a, b) =>             ║
+║         b.scores.overallImpression -                    ║
+║         a.scores.overallImpression                      ║
+║       )                                                 ║
+║                                                          ║
+║    B) EXTRACT METRICS:                                  ║
+║       bestAttempt = sortedAttempts[0]                   ║
+║       worstAttempt = sortedAttempts[length-1]           ║
+║       attemptCount = group.length                       ║
+║                                                          ║
+║    C) COMPUTE AVERAGES (per category):                  ║
+║       avgConfidence = sum all attempts' scores /         ║
+║                       attemptCount                      ║
+║       avgTechnical = sum all attempts' scores /          ║
+║                      attemptCount                       ║
+║       ... (repeat for all 7 categories)                 ║
+║                                                          ║
+║    D) COMPUTE IMPROVEMENT:                              ║
+║       improvement = bestAttempt.overall -               ║
+║                    worstAttempt.overall                 ║
+║                                                          ║
+║ 6. BUILD GROUPEDANALYTICS STATE:                        ║
+║    ────────────────────────────                        ║
+║    setGroupedAnalytics({                                ║
+║      "sde_en": {                                        ║
+║        attempts: [attempt1, attempt2, attempt3],        ║
+║        bestAttempt: attempt1 (highest score),           ║
+║        worstAttempt: attempt3 (lowest score),           ║
+║        attemptCount: 3,                                 ║
+║        avgScores: {                                     ║
+║          overallImpression: 78.33,                      ║
+║          confidenceClarity: 76.67,                      ║
+║          technicalKnowledge: 80.0,                      ║
+║          roleFit: 75.33,                                ║
+║          culturalFit: 79.67,                            ║
+║          communication: 77.0,                           ║
+║          problemSolving: 81.0                           ║
+║        },                                               ║
+║        improvement: 12 // best - worst                  ║
+║      },                                                 ║
+║      "fe_hi": {                                         ║
+║        attempts: [attempt1, attempt2],                  ║
+║        bestAttempt: attempt1,                           ║
+║        worstAttempt: attempt2,                          ║
+║        attemptCount: 2,                                 ║
+║        avgScores: {...},                                ║
+║        improvement: 8                                   ║
+║      }                                                  ║
+║    })                                                   ║
+║                                                          ║
+║ 7. APPLY FILTERS:                                       ║
+║    ───────────────                                      ║
+║    Optional filters to apply before display:            ║
+║    - By role (e.g., only "SDE")                         ║
+║    - By language (e.g., only "en")                      ║
+║    - By score range (e.g., 70-90)                       ║
+║                                                          ║
+║    Implementation: filter groupedAnalytics keys         ║
+║    based on filter conditions                           ║
+╚════════════════════════┬═════════════════════════════════╝
+                         ↓
+
+┌──────────────────────────────────────────────────────────┐
+│ STEP 7: RENDER LEADERBOARD UI                           │
+│                                                          │
+│ File: app/(root)/analytics/page.tsx (JSX render)        │
+│                                                          │
+│ A) LAYOUT:                                               │
+│    ────────                                              │
+│    ┌──────────────────────────────────────┐             │
+│    │ Filters (Role, Language, Score Range)│             │
+│    ├──────────────────────────────────────┤             │
+│    │ For each interviewId group:          │             │
+│    │                                      │             │
+│    │ [Expandable Section]                 │             │
+│    │ ├─ interviewId: "sde_en"             │             │
+│    │ ├─ Attempts: 3                       │             │
+│    │ ├─ Best Score: 85                    │             │
+│    │ ├─ Improvement: +12                  │             │
+│    │ │                                    │             │
+│    │ └─ [Expand] ▼                        │             │
+│    │    │                                 │             │
+│    │    ├─ Attempt 1 (SDE, EN) - 85/100  │             │
+│    │    ├─ Attempt 2 (SDE, EN) - 78/100  │             │
+│    │    └─ Attempt 3 (SDE, EN) - 73/100  │             │
+│    │                                      │             │
+│    │ [Comparison View]                    │             │
+│    │ ├─ If 1 attempt: Show scorecard      │             │
+│    │ ├─ If 2 attempts: Side-by-side table │             │
+│    │ └─ If 3+ attempts: Full ranking grid │             │
+│    │                                      │             │
+│    └──────────────────────────────────────┘             │
+│                                                          │
+│ B) RENDERING LOGIC BY ATTEMPT COUNT:                    │
+│    ──────────────────────────────────                   ║
+│                                                          │
+│    IF attemptCount === 1:                               │
+│    ──────────────────────                              │
+│    Display: Normal Scorecard                            │
+│    - Title: "Single Attempt"                            │
+│    - Card view with all 7 category scores               │
+│    - Bars for visual score representation               │
+│    - Color coding:                                      │
+│      • 90-100: Green (Excellent)                        │
+│      • 75-89: Blue (Good)                               │
+│      • 60-74: Yellow (Average)                          │
+│      • <60: Red (Needs Improvement)                     │
+│                                                          │
+│    IF attemptCount === 2:                               │
+│    ──────────────────────                              │
+│    Display: Side-by-Side Comparison Table               │
+│    ┌─────────────────────────────────────┐             │
+│    │ Category           │ Attempt 1 │ Att 2│            │
+│    ├────────────────────┼──────────┼──────┤            │
+│    │ Overall Impression │    85    │  78  │            │
+│    │ Confidence         │    82    │  75  │            │
+│    │ Technical Knowledge│    88    │  80  │            │
+│    │ Role Fit           │    81    │  76  │            │
+│    │ Cultural Fit       │    86    │  79  │            │
+│    │ Communication      │    83    │  77  │            │
+│    │ Problem-Solving    │    87    │  81  │            │
+│    └─────────────────────────────────────┘             │
+│                                                          │
+│    IF attemptCount >= 3:                                │
+│    ──────────────────────                              │
+│    Display: Full Ranking Matrix                         │
+│    ┌─────────────────────────────────────────┐         │
+│    │ Rank │ Date       │ Overall │ Trend    │         │
+│    ├──────┼────────────┼─────────┼──────────┤         │
+│    │  🥇 1│ 2026-04-20 │   85    │ ↑ +12   │         │
+│    │  🥈 2│ 2026-04-15 │   78    │ ↑ +5    │         │
+│    │  🥉 3│ 2026-04-10 │   73    │ ──      │         │
+│    └─────────────────────────────────────────┘         │
+│                                                          │
+│ C) AVERAGE PERFORMANCE CARD:                            │
+│    ──────────────────────                              │
+│    Display on each group showing:                       │
+│    - "Average Performance Across All Attempts"          │
+│    - Aggregate scorecard with avg values                │
+│    - Progress bars filled to avg percentage             │
+│                                                          │
+│ D) COLOR CODING SCHEME:                                 │
+│    ─────────────────                                    │
+│    0-20:   #EF4444 (Red)         // Critical            │
+│    21-40:  #F97316 (Orange)      // Poor                │
+│    41-60:  #EAB308 (Yellow)      // Average             │
+│    61-80:  #3B82F6 (Blue)        // Good                │
+│    81-100: #10B981 (Green)       // Excellent           │
+│                                                          │
+│ E) INTERACTION:                                          │
+│    ────────────                                         │
+│    - Click [Expand/Collapse] to show/hide attempt list │
+│    - Click an attempt to view full details             │
+│    - Apply filters, leaderboard updates in real-time   │
+│    - Hover over scores shows percentile ranking        │
+└──────────────────────────────────────────────────────────┘
+```
+
+---
+
+### DATA TYPES & CONTRACTS
+
+**File: `types/database.ts`**
+
+```typescript
+export interface InterviewAttempt {
+  attemptId: string;              // UUID, primary key
+  interviewId: string;            // Normalized from role+language
+  userId: string;                 // Firebase UID
+  role: string;                   // Interview role (e.g., "SDE", "FE")
+  language: "en" | "hi";          // Interview language
+  createdAt: string;              // ISO timestamp
+  scores: {
+    overallImpression: number;    // 0-100, primary ranking score
+    confidenceClarity: number;    // 0-100
+    technicalKnowledge: number;   // 0-100
+    roleFit: number;              // 0-100
+    culturalFit: number;          // 0-100
+    communication: number;        // 0-100
+    problemSolving: number;        // 0-100
+  };
+}
+
+export interface GroupAnalytics {
+  attempts: InterviewAttempt[];
+  bestAttempt: InterviewAttempt;
+  worstAttempt: InterviewAttempt;
+  attemptCount: number;
+  avgScores: {
+    overallImpression: number;
+    confidenceClarity: number;
+    technicalKnowledge: number;
+    roleFit: number;
+    culturalFit: number;
+    communication: number;
+    problemSolving: number;
+  };
+  improvement: number;  // bestAttempt.overall - worstAttempt.overall
+}
+
+export interface FilterOptions {
+  role?: string;
+  language?: string;
+  minScore?: number;
+  maxScore?: number;
+}
+```
+
+---
+
+### INDEXEDDB OPERATIONS & PERSISTENCE
+
+**File: `utils/db.ts`**
+
+```typescript
+// Database initialization
+export const db = new Dexie('interview_platform') as Dexie & {
+  interview_attempts: Table<InterviewAttempt>;
+};
+
+db.version(1).stores({
+  interview_attempts: '++attemptId, interviewId, userId, createdAt'
+});
+
+// Function 1: Save new attempt
+export async function saveInterviewAttempt(
+  attempt: InterviewAttempt
+): Promise<string> {
+  try {
+    const id = await db.interview_attempts.add(attempt);
+    console.log(`✅ Attempt ${id} saved to IndexedDB`);
+    return id;
+  } catch (error) {
+    console.error('❌ Failed to save attempt:', error);
+    throw error;
+  }
+}
+
+// Function 2: Retrieve all attempts for a user
+export async function getInterviewAttempts(
+  userId: string,
+  filters?: FilterOptions
+): Promise<InterviewAttempt[]> {
+  let results = await db.interview_attempts
+    .where('userId')
+    .equals(userId)
+    .toArray();
+
+  // Apply optional filters
+  if (filters?.role) {
+    results = results.filter(a => a.role === filters.role);
+  }
+  if (filters?.language) {
+    results = results.filter(a => a.language === filters.language);
+  }
+  if (filters?.minScore !== undefined) {
+    results = results.filter(
+      a => a.scores.overallImpression >= filters.minScore!
+    );
+  }
+  if (filters?.maxScore !== undefined) {
+    results = results.filter(
+      a => a.scores.overallImpression <= filters.maxScore!
+    );
+  }
+
+  // Sort by creation date (newest first)
+  return results.sort(
+    (a, b) =>
+      new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  );
+}
+
+// Function 3: Normalize interview ID for grouping
+export function normalizeInterviewId(role: string, language: string): string {
+  return `${role.toLowerCase()}_${language}`;
+}
+```
+
+---
+
+### ANALYTICS PAGE LOGIC
+
+**File: `app/(root)/analytics/page.tsx`**
+
+```typescript
+// Key Functions:
+
+// 1. Load all attempts for user
+async function loadAnalytics(userId: string) {
+  const attempts = await getInterviewAttempts(userId);
+  return attempts;
+}
+
+// 2. Group attempts by interviewId
+function groupByInterviewId(
+  attempts: InterviewAttempt[]
+): Record<string, InterviewAttempt[]> {
+  return attempts.reduce((acc, attempt) => {
+    const key = attempt.interviewId;
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(attempt);
+    return acc;
+  }, {} as Record<string, InterviewAttempt[]>);
+}
+
+// 3. Compute analytics per group
+function computeGroupAnalytics(
+  interviewId: string,
+  group: InterviewAttempt[]
+): GroupAnalytics {
+  // Sort by overall score descending
+  const sorted = [...group].sort(
+    (a, b) => b.scores.overallImpression - a.scores.overallImpression
+  );
+
+  const bestAttempt = sorted[0];
+  const worstAttempt = sorted[sorted.length - 1];
+
+  // Compute averages for each category
+  const avgScores = {
+    overallImpression:
+      group.reduce((sum, a) => sum + a.scores.overallImpression, 0) /
+      group.length,
+    confidenceClarity:
+      group.reduce((sum, a) => sum + a.scores.confidenceClarity, 0) /
+      group.length,
+    technicalKnowledge:
+      group.reduce((sum, a) => sum + a.scores.technicalKnowledge, 0) /
+      group.length,
+    roleFit:
+      group.reduce((sum, a) => sum + a.scores.roleFit, 0) / group.length,
+    culturalFit:
+      group.reduce((sum, a) => sum + a.scores.culturalFit, 0) / group.length,
+    communication:
+      group.reduce((sum, a) => sum + a.scores.communication, 0) /
+      group.length,
+    problemSolving:
+      group.reduce((sum, a) => sum + a.scores.problemSolving, 0) /
+      group.length,
+  };
+
+  return {
+    attempts: sorted,
+    bestAttempt,
+    worstAttempt,
+    attemptCount: group.length,
+    avgScores,
+    improvement:
+      bestAttempt.scores.overallImpression -
+      worstAttempt.scores.overallImpression,
+  };
+}
+
+// 4. Render appropriate view based on attempt count
+function renderComparisonView(analytics: GroupAnalytics): JSX.Element {
+  const { attemptCount, attempts, avgScores } = analytics;
+
+  if (attemptCount === 1) {
+    // Single attempt: render scorecard
+    return <SingleAttemptCard attempt={attempts[0]} />;
+  } else if (attemptCount === 2) {
+    // Two attempts: render side-by-side comparison
+    return <ComparisonTable attempts={attempts} />;
+  } else {
+    // 3+ attempts: render full ranking matrix
+    return <RankingMatrix attempts={attempts} />;
+  }
+}
+
+// 5. Apply filters and render leaderboard
+function renderLeaderboard(
+  groupedAnalytics: Record<string, GroupAnalytics>,
+  filters: FilterOptions
+): JSX.Element[] {
+  return Object.entries(groupedAnalytics)
+    .filter(([interviewId, _]) => {
+      const [role, lang] = interviewId.split('_');
+      if (filters.role && role !== filters.role.toLowerCase()) return false;
+      if (filters.language && lang !== filters.language) return false;
+      return true;
+    })
+    .map(([interviewId, analytics]) => (
+      <AnalyticsGroup
+        key={interviewId}
+        interviewId={interviewId}
+        analytics={analytics}
+        onExpand={() => {/* toggle expansion */}}
+      />
+    ));
+}
+```
+
+---
+
+### UI COMPONENTS & VISUALIZATION - DETAILED BREAKDOWN
+
+**File: `app/(root)/analytics/page.tsx` (JSX Components)**
+
+#### **WHAT YOU SEE ON SCREEN - COMPLETE VISUAL LAYOUT**
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                          ANALYTICS PAGE - FULL VIEW                          │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  📊 HEADER SECTION                                                           │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ "Performance Hub" (small label in light text)                          │ │
+│  │ "Interview Analytics" (large bold heading)                            │ │
+│  │                                                                        │ │
+│  │ [Back to Dashboard] [New Interview] (buttons on right)                │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                                                                              │
+│  📈 STATS CARDS SECTION (3 columns)                                         │
+│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐         │
+│  │ Total Attempts   │  │ Interview Groups │  │ Average Overall  │         │
+│  │                  │  │                  │  │                  │         │
+│  │   [3]            │  │   [2]            │  │    [78.5]        │         │
+│  │                  │  │                  │  │                  │         │
+│  │ Stored interview │  │ Unique role-lang │  │ How your recent  │         │
+│  │ runs available   │  │ combos after     │  │ interview quality│         │
+│  │ in analytics     │  │ current filters  │  │ is trending      │         │
+│  └──────────────────┘  └──────────────────┘  └──────────────────┘         │
+│                                                                              │
+│  🔍 FILTERS SECTION                                                          │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ "Filters"  (heading)                                                   │ │
+│  │ Narrow the view by role, language, or overall score range             │ │
+│  │                                                                        │ │
+│  │ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ │ │
+│  │ │ Role         │ │ Language     │ │ Min Overall  │ │ Max Overall  │ │ │
+│  │ │ [All roles▼] │ │ [All langs▼] │ │ [0_______]   │ │ [100______]  │ │ │
+│  │ └──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘ │ │
+│  │ • Options: "SDE", "Frontend", "Backend", etc (if you did those)      │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                                                                              │
+│  🏆 LEADERBOARD CARDS SECTION (Main Content)                                │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ 📌 Interview: "SDE - English" (sde_en)                                │ │
+│  │ ├─ Attempts: 3  │  Best Score: 85  │  Improvement: +12  │ [▼ Expand]  │ │
+│  │ │                                                                      │ │
+│  │ │ When Expanded ▼                                                     │ │
+│  │ │ ┌─ Attempt 1: 85/100  (Apr 20, 2026) [View Details]                │ │
+│  │ │ ├─ Attempt 2: 78/100  (Apr 15, 2026) [View Details]                │ │
+│  │ │ └─ Attempt 3: 73/100  (Apr 10, 2026) [View Details]                │ │
+│  │ │                                                                      │ │
+│  │ │ COMPARISON VIEW (Shows based on attempt count):                    │ │
+│  │ │                                                                      │ │
+│  │ │ IF 3 Attempts → Full Ranking Matrix:                               │ │
+│  │ │ ┌────────────────────────────────────────────────────────────────┐ │ │
+│  │ │ │ Rank │ Date       │ Overall │ Confidence │ Technical │ ... │ │ │
+│  │ │ ├──────┼────────────┼─────────┼────────────┼───────────┼─────┤ │ │
+│  │ │ │ 🥇 1 │ Apr 20     │   85    │     82     │     88    │ ... │ │ │
+│  │ │ │ 🥈 2 │ Apr 15     │   78    │     75     │     80    │ ... │ │ │
+│  │ │ │ 🥉 3 │ Apr 10     │   73    │     70     │     76    │ ... │ │ │
+│  │ │ └────────────────────────────────────────────────────────────────┘ │ │
+│  │ │                                                                      │ │
+│  │ │ AVERAGE PERFORMANCE CARD:                                          │ │
+│  │ │ ┌────────────────────────────────────────────────────────────────┐ │ │
+│  │ │ │ 📊 Average Performance (All 3 Attempts)                       │ │ │
+│  │ │ │                                                                │ │ │
+│  │ │ │ • Overall Impression:  78.7   ███████████░░░ (79%)           │ │ │
+│  │ │ │ • Confidence & Clarity: 75.7   ███████░░░░░░░░ (76%)         │ │ │
+│  │ │ │ • Technical Knowledge:  81.3   ████████░░░░░░░ (81%)         │ │ │
+│  │ │ │ • Role Fit:            76.3   ███████░░░░░░░░ (76%)         │ │ │
+│  │ │ │ • Cultural Fit:        79.7   ████████░░░░░░░ (80%)         │ │ │
+│  │ │ │ • Communication:       78.3   ████████░░░░░░░ (78%)         │ │ │
+│  │ │ │ • Problem-Solving:     80.3   ████████░░░░░░░ (80%)         │ │ │
+│  │ │ └────────────────────────────────────────────────────────────────┘ │ │
+│  │ │                                                                      │ │
+│  │ │ IMPROVEMENT BADGE: ↑ +12 points from attempt 3 → attempt 1        │ │
+│  │ └──────────────────────────────────────────────────────────────────┘ │ │
+│  │                                                                        │ │
+│  │ 📌 Interview: "Frontend - Hindi" (frontend_hi)                       │ │
+│  │ ├─ Attempts: 1  │  Score: 82  │  [▼ Expand]                         │ │
+│  │ │                                                                      │ │
+│  │ │ When Expanded ▼                                                     │ │
+│  │ │                                                                      │ │
+│  │ │ SINGLE ATTEMPT SCORECARD:                                          │ │
+│  │ │ ┌────────────────────────────────────────────────────────────────┐ │ │
+│  │ │ │ 📋 Attempt from Apr 18, 2026                                  │ │ │
+│  │ │ │                                                                │ │ │
+│  │ │ │ Overall Impression: 82  (Color: GREEN - Excellent)           │ │ │
+│  │ │ │ ════════════════════════════════════════════════════  82/100  │ │ │
+│  │ │ │                                                                │ │ │
+│  │ │ │ Confidence & Clarity: 80                                      │ │ │
+│  │ │ │ ════════════════════════════════════════════════════  80/100  │ │ │
+│  │ │ │                                                                │ │ │
+│  │ │ │ Technical Knowledge: 85 (Color: GREEN - Excellent)            │ │ │
+│  │ │ │ ═════════════════════════════════════════════════════  85/100 │ │ │
+│  │ │ │                                                                │ │ │
+│  │ │ │ Role Fit: 78 (Color: BLUE - Good)                             │ │ │
+│  │ │ │ ══════════════════════════════════════════════════════  78/100 │ │ │
+│  │ │ │                                                                │ │ │
+│  │ │ │ Cultural Fit: 81 (Color: GREEN - Excellent)                   │ │ │
+│  │ │ │ ═════════════════════════════════════════════════════  81/100 │ │ │
+│  │ │ │                                                                │ │ │
+│  │ │ │ Communication: 79 (Color: BLUE - Good)                         │ │ │
+│  │ │ │ ═══════════════════════════════════════════════════════  79/100 │ │ │
+│  │ │ │                                                                │ │ │
+│  │ │ │ Problem-Solving: 84 (Color: GREEN - Excellent)               │ │ │
+│  │ │ │ ════════════════════════════════════════════════════  84/100  │ │ │
+│  │ │ └────────────────────────────────────────────────────────────────┘ │ │
+│  │ │ [Share Results] [Download PDF] [View Full Feedback]               │ │
+│  │ └──────────────────────────────────────────────────────────────────┘ │ │
+│  │                                                                        │ │
+│  │ 📌 Interview: "Backend - English" (backend_en)                      │ │
+│  │ ├─ Attempts: 2  │  Best: 88  │  [▼ Expand]                          │ │
+│  │ │                                                                      │ │
+│  │ │ When Expanded ▼                                                     │ │
+│  │ │ ┌────────────────────────────────────────────────────────────────┐ │ │
+│  │ │ │ 🔄 SIDE-BY-SIDE COMPARISON (2 Attempts)                      │ │ │
+│  │ │ │                                                                │ │ │
+│  │ │ │ ┌─────────────────────┬──────────────┬──────────────┐        │ │ │
+│  │ │ │ │ Category            │ Attempt 1    │ Attempt 2    │        │ │ │
+│  │ │ │ ├─────────────────────┼──────────────┼──────────────┤        │ │ │
+│  │ │ │ │ Overall Impression  │ 88 (GREEN)   │ 81 (BLUE)    │        │ │ │
+│  │ │ │ │ Confidence & Clarity│ 85 (GREEN)   │ 78 (BLUE)    │        │ │ │
+│  │ │ │ │ Technical Knowledge │ 92 (GREEN)   │ 86 (GREEN)   │        │ │ │
+│  │ │ │ │ Role Fit            │ 87 (GREEN)   │ 80 (BLUE)    │        │ │ │
+│  │ │ │ │ Cultural Fit        │ 89 (GREEN)   │ 82 (BLUE)    │        │ │ │
+│  │ │ │ │ Communication       │ 86 (GREEN)   │ 79 (BLUE)    │        │ │ │
+│  │ │ │ │ Problem-Solving     │ 90 (GREEN)   │ 83 (BLUE)    │        │ │ │
+│  │ │ │ └─────────────────────┴──────────────┴──────────────┘        │ │ │
+│  │ │ │                                                                │ │ │
+│  │ │ │ ↑ Improvement: +7 points (Attempt 1 is better)               │ │ │
+│  │ │ └────────────────────────────────────────────────────────────────┘ │ │
+│  │ └──────────────────────────────────────────────────────────────────┘ │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+#### **DETAILED CALCULATION BREAKDOWN FOR EVERY NUMBER**
+
+##### **1. STATS CARDS (Top Section)**
+
+**CARD 1: Total Attempts**
+```
+Calculation:
+  attempts.length = 3
+  
+Formula:
+  Total Attempts = Count of all InterviewAttempt records for this user
+  
+Example Data:
+  Attempt 1 (SDE, EN, Score 85, Apr 20)
+  Attempt 2 (SDE, EN, Score 78, Apr 15)
+  Attempt 3 (SDE, EN, Score 73, Apr 10)
+  Attempt 4 (Frontend, HI, Score 82, Apr 18)
+  Attempt 5 (Backend, EN, Score 88, Apr 21)
+  
+Result: 5 Total Attempts shown
+```
+
+**CARD 2: Interview Groups**
+```
+Calculation:
+  uniqueInterviewIds = new Set(
+    attempts.map(a => a.interviewId)
+  ).size
+  
+Step-by-step:
+  1. Extract all interviewIds: ["sde_en", "sde_en", "sde_en", "frontend_hi", "backend_en"]
+  2. Get unique values: {"sde_en", "frontend_hi", "backend_en"}
+  3. Count unique: 3
+  
+Formula:
+  Interview Groups = Count of unique (role + language) combinations
+  
+Context: After filters applied
+  If Role Filter = "SDE": Groups = 1 (only "sde_en")
+  If Language Filter = "HI": Groups = 1 (only "frontend_hi")
+  If No Filters: Groups = 3
+  
+Result: 3 Interview Groups shown
+```
+
+**CARD 3: Average Overall**
+```
+Calculation:
+  averageOverall = attempts
+    .reduce((sum, attempt) => 
+      sum + attempt.scores.overallImpression, 0
+    ) / attempts.length
+  
+Step-by-step:
+  1. Sum all overallImpression scores:
+     85 + 78 + 73 + 82 + 88 = 406
+  2. Divide by total attempts:
+     406 / 5 = 81.2
+  3. Round to 1 decimal:
+     81.2
+  
+Formula:
+  Average Overall = (Score1 + Score2 + ... + ScoreN) / N
+  
+Result: 81.2 shown in card
+Color Coding:
+  0-20:   🔴 Red (Critical)
+  21-40:  🟠 Orange (Poor)
+  41-60:  🟡 Yellow (Average)
+  61-80:  🔵 Blue (Good)
+  81-100: 🟢 Green (Excellent)
+  
+In this case: 81.2 = 🟢 Green
+```
+
+---
+
+##### **2. FILTER SECTION**
+
+```
+Dropdown 1 - Role:
+  Default: "All roles"
+  Options: All unique values from attempts.map(a => a.role).sort()
+  
+  With data: ["Backend", "Frontend", "SDE"]
+  When selected: "SDE" → Filter only attempts where role === "SDE"
+
+Dropdown 2 - Language:
+  Default: "All languages"
+  Options: All unique values from attempts.map(a => a.language).sort()
+  
+  With data: ["en", "hi"]
+  When selected: "hi" → Filter only attempts where language === "hi"
+
+Slider 1 - Min Overall:
+  Default: 0
+  Range: 0-100
+  When set to 75: Filter only attempts where overallImpression >= 75
+
+Slider 2 - Max Overall:
+  Default: 100
+  Range: 0-100
+  When set to 85: Filter only attempts where overallImpression <= 85
+
+Combined Filter Logic:
+  filteredAttempts = attempts.filter(a => 
+    (roleFilter === "all" || a.role === roleFilter) &&
+    (langFilter === "all" || a.language === langFilter) &&
+    a.scores.overallImpression >= minScore &&
+    a.scores.overallImpression <= maxScore
+  )
+```
+
+---
+
+##### **3. LEADERBOARD CARDS - GROUP ANALYTICS CALCULATION**
+
+```
+For each unique interviewId, the system computes:
+
+STEP 1: Group all attempts by interviewId
+  grouped["sde_en"] = [attempt1, attempt2, attempt3]
+  grouped["frontend_hi"] = [attempt4]
+  grouped["backend_en"] = [attempt5]
+
+STEP 2: Sort by overallImpression (highest first)
+  grouped["sde_en"].sort((a, b) => 
+    b.scores.overallImpression - a.scores.overallImpression
+  )
+  
+  Result: [attempt1(85), attempt2(78), attempt3(73)]
+
+STEP 3: Extract Key Metrics
+  
+  a) Best Attempt = First in sorted list
+     bestAttempt = attempt1
+     bestScore = 85
+     Display: "Best Score: 85"
+     
+  b) Worst Attempt = Last in sorted list
+     worstAttempt = attempt3
+     worstScore = 73
+     Display: Hidden (used for calculation)
+     
+  c) Attempt Count = Length of group
+     attemptCount = 3
+     Display: "Attempts: 3"
+     
+  d) Improvement = Best - Worst
+     improvement = 85 - 73 = 12
+     Display: "Improvement: +12 points"
+
+STEP 4: Calculate Averages for Each Category
+  
+  For each of the 7 score categories:
+  
+    avgConfidence = (82 + 75 + 70) / 3 = 75.67 ≈ 75.7
+    avgTechnical = (88 + 80 + 76) / 3 = 81.33 ≈ 81.3
+    avgRoleFit = (81 + 76 + 72) / 3 = 76.33 ≈ 76.3
+    avgCulturalFit = (86 + 79 + 74) / 3 = 79.67 ≈ 79.7
+    avgCommunication = (83 + 77 + 73) / 3 = 77.67 ≈ 77.7
+    avgProblemSolving = (87 + 81 + 75) / 3 = 81 ≈ 81.0
+    avgOverall = (85 + 78 + 73) / 3 = 78.67 ≈ 78.7
+
+STEP 5: Display Card Header
+  
+  Card Title: "Interview: SDE - English"
+  Summary: "Attempts: 3 | Best Score: 85 | Improvement: +12"
+  Status: [▼ Expand] button
+
+FINAL GROUP ANALYTICS OBJECT:
+  {
+    interviewId: "sde_en",
+    attempts: [attempt1, attempt2, attempt3],
+    bestAttempt: attempt1,
+    worstAttempt: attempt3,
+    attemptCount: 3,
+    bestScore: 85,
+    worstScore: 73,
+    improvement: 12,
+    avgScores: {
+      overallImpression: 78.7,
+      confidenceClarity: 75.7,
+      technicalKnowledge: 81.3,
+      roleFit: 76.3,
+      culturalFit: 79.7,
+      communication: 77.7,
+      problemSolving: 81.0
+    }
+  }
+```
+
+---
+
+##### **4. EXPANDED CARD - WHAT YOU SEE WHEN CLICKING EXPAND**
+
+**IF 1 ATTEMPT → SINGLE ATTEMPT SCORECARD**
+```
+Data:
+  Attempt from Apr 18, 2026
+  Scores: {
+    overallImpression: 82,
+    confidenceClarity: 80,
+    technicalKnowledge: 85,
+    roleFit: 78,
+    culturalFit: 81,
+    communication: 79,
+    problemSolving: 84
+  }
+
+Display:
+  For each score:
+    1. Metric Name (e.g., "Overall Impression")
+    2. Score Number (e.g., "82")
+    3. Progress Bar: ███████████░░░░░░░░░░░░░░░░░░░░░░░░ 82/100
+    4. Color based on value:
+       85 = 🟢 Green (81-100 range)
+       78 = 🔵 Blue (61-80 range)
+       
+  Calculation for Progress Bar Width:
+    barPercentage = (score / 100) * 100 = (82 / 100) * 100 = 82%
+    visually: filled █ 82% | empty ░ 18%
+```
+
+**IF 2 ATTEMPTS → SIDE-BY-SIDE COMPARISON TABLE**
+```
+Data:
+  Attempt 1: All 7 scores
+  Attempt 2: All 7 scores
+
+Display Format:
+  Column 1: Category Name
+  Column 2: Attempt 1 score
+  Column 3: Attempt 2 score
+  
+  Each cell includes:
+    - Score number
+    - Color coding
+    - Trend indicator (↑ ↓ → if scores differ)
+
+Example:
+  ┌──────────────────────┬───────────────┬───────────────┐
+  │ Overall Impression   │ 88 (GREEN) ↑ │ 81 (BLUE)    │
+  │ Technical Knowledge  │ 92 (GREEN) →  │ 86 (GREEN)   │
+  │ Confidence & Clarity │ 85 (GREEN) ↑ │ 78 (BLUE)    │
+  └──────────────────────┴───────────────┴───────────────┘
+
+Calculation for Trend Arrows:
+  If Attempt1 > Attempt2: ↑ (improved)
+  If Attempt1 < Attempt2: ↓ (declined)
+  If Attempt1 = Attempt2: → (same)
+  
+Example: 88 > 81, so show ↑
+
+Overall Improvement Shown:
+  improvement = 88 - 81 = 7 points
+  Display: "↑ Improvement: +7 points"
+```
+
+**IF 3+ ATTEMPTS → FULL RANKING MATRIX**
+```
+Data: All attempts for this interviewId, already sorted by score (highest first)
+
+Display Format:
+  Columns:
+    1. Rank Badge (🥇 🥈 🥉 4️⃣ etc.)
+    2. Date (YYYY-MM-DD format)
+    3. Overall Score
+    4. Confidence Score
+    5. Technical Score
+    ... (all 7 categories)
+
+Example with 3 attempts:
+  ┌────────┬───────────┬─────────┬────────────┬───────────┬──────────┐
+  │ 🥇 #1  │ Apr 20    │ 85      │ 82         │ 88        │ ...      │
+  │ 🥈 #2  │ Apr 15    │ 78      │ 75         │ 80        │ ...      │
+  │ 🥉 #3  │ Apr 10    │ 73      │ 70         │ 76        │ ...      │
+  └────────┴───────────┴─────────┴────────────┴───────────┴──────────┘
+
+Rank Calculation:
+  Sorted by overallImpression descending
+  Rank 1 = Highest score
+  Rank N = Lowest score
+  
+Badge Assignment:
+  Rank 1: 🥇 (Gold - Excellent)
+  Rank 2: 🥈 (Silver - Good)
+  Rank 3: 🥉 (Bronze - Acceptable)
+  Rank 4+: #️⃣ (Number)
+```
+
+**AVERAGE PERFORMANCE CARD (shown in expanded view)**
+```
+Calculation:
+  For each category, calculate average across ALL attempts in group
+  
+  avgOverall = (85 + 78 + 73) / 3 = 78.67 → 78.7
+  avgConfidence = (82 + 75 + 70) / 3 = 75.67 → 75.7
+  avgTechnical = (88 + 80 + 76) / 3 = 81.33 → 81.3
+  ... (repeat for all 7 categories)
+
+Display:
+  For each average score:
+    1. Category Name (e.g., "Overall Impression")
+    2. Average Score (e.g., "78.7")
+    3. Percentage (78.7% of max)
+    4. Progress Bar: filled to percentage
+       Example: 78.7/100 = 78.7%
+       Visual: ████████████████████░░░░░░░░░░░░░░ (78.7%)
+    5. Color Coding based on value
+       78.7 = 🔵 Blue (61-80 range)
+
+Example:
+  • Overall Impression: 78.7
+    ════════════════════════════════════════════════════ 78.7/100
+    Color: 🔵 Blue (Good range)
+    
+  • Technical Knowledge: 81.3
+    ═════════════════════════════════════════════════════ 81.3/100
+    Color: 🟢 Green (Excellent range)
+```
+
+---
+
+#### **COLOR CODING REFERENCE TABLE**
+
+```
+Score Range → Color  → Meaning             → Badge
+─────────────────────────────────────────────────────
+90-100      → 🟢 Green → Excellent          → ★★★★★
+75-89       → 🔵 Blue  → Good               → ★★★★
+60-74       → 🟡 Yellow→ Average            → ★★★
+40-59       → 🟠 Orange→ Poor               → ★★
+0-39        → 🔴 Red   → Needs Improvement → ★
+```
+
+---
+
+#### **COMPONENTS BREAKDOWN**
+
+1. **StatsCard** — Displays one metric (Total Attempts, Groups, Average)
+   - Props: `title`, `value`, `description`
+   - Calculation: Simple aggregation or average
+   
+2. **FilterBar** — Dropdowns and sliders for filtering
+   - Props: `onFilterChange`, `availableRoles`, `availableLanguages`
+   - Updates: Triggers re-calculation of displayed cards
+   
+3. **AnalyticsGroup** — Each expandable role-language combination card
+   - Props: `interviewId`, `groupAnalytics`, `isExpanded`
+   - Shows: Summary card + expanded content
+   
+4. **SingleAttemptCard** — Shows 1 attempt with all 7 scores
+   - Props: `attempt`
+   - Components: 7 ScoreBar components
+   
+5. **ComparisonTable** — Side-by-side table for 2 attempts
+   - Props: `attempts`
+   - Rows: 7 category names
+   - Columns: Attempt 1, Attempt 2, Trend indicator
+   
+6. **RankingMatrix** — Grid for 3+ attempts
+   - Props: `attempts`
+   - Automatically sorts by overall score
+   - Shows rank badge, date, all 7 scores
+   
+7. **AveragePerformanceCard** — Shows aggregate across group
+   - Props: `avgScores`, `attemptCount`
+   - Components: 7 AverageScoreBar components
+   
+8. **ScoreBar** — Visual progress bar for single score
+   - Props: `label`, `score`, `total=100`
+   - Renders: Bar width = (score/100)*100%, color-coded
+   
+9. **AverageScoreBar** — Visual progress bar for average score
+   - Props: `label`, `average`, `total=100`
+   - Renders: Bar width = (average/100)*100%, color-coded
+
+---
+
+### DATA FLOW SUMMARY
+
+```
+Interview Completion
+        ↓
+createFeedback() [Firestore]
+        ↓
+Extract & Normalize Scores [Agent.tsx]
+        ↓
+saveInterviewAttempt() [IndexedDB]
+        ↓
+User Navigates to /analytics
+        ↓
+loadAnalytics() [getInterviewAttempts()]
+        ↓
+Group by interviewId
+        ↓
+Compute Group Analytics (best, worst, averages)
+        ↓
+Apply Filters (role, language, score range)
+        ↓
+Render Leaderboard
+        ├─ Single attempt → Scorecard
+        ├─ Two attempts → Comparison table
+        └─ 3+ attempts → Ranking matrix
+```
+
+---
+
+
+
+
+
+
+
+
 
 ### 5) Feedback Generation (Updated Cultural Fit)
 
@@ -445,7 +1731,443 @@ Example (Resume Mode):
 }
 ```
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ---
+
+## 🧠 Leetc Coding Platform Flow (`leetc/coding-platform`)
+
+This section documents the exact Leetc coding platform flow, including how button clicks map to files, how the Judge0 integration works, how test cases are managed, and how runtime is calculated.
+
+### 1. Entry page: `src/pages/Problem.tsx`
+
+This is the main coding interface.
+
+- Loads a sample problem into state on mount.
+- Manages application state for the current code, selected language, evaluation status, results, and feedback.
+- Renders UI components:
+  - `ProblemDisplay` — shows problem title, description, sample I/O, and constraints.
+  - `HintSystem` — shows hints and the reference solution help section.
+  - `CodeEditor` — the Monaco editor with language switching.
+  - `CustomTestCase` — custom input execution.
+  - `TestResults` — result grid and feedback summary.
+- Handles three actions:
+  - `handleRunCode()` — run visible sample test cases.
+  - `handleSubmitSolution()` — run all sample + hidden test cases.
+  - `handleCustomTest()` — run a single custom input.
+
+### 2. UI flow and buttons
+
+#### `Run Code`
+
+1. `Problem.tsx` calls `handleRunCode()`.
+2. It prepares test cases with `prepareTestCases(problem)`.
+3. It filters out hidden cases so only public examples are executed.
+4. It calls `evaluateCode(code, language, visibleTestCases)`.
+5. Results and feedback are displayed.
+6. Status is set to:
+   - `Accepted` when all cases pass
+   - `Runtime Error` when any case contains runtime error text
+   - `Wrong Answer` otherwise
+
+#### `Submit Solution`
+
+1. `Problem.tsx` calls `handleSubmitSolution()`.
+2. It prepares the full set of test cases including hidden ones.
+3. It calls `evaluateCode(code, language, testCases)`.
+4. Results and feedback are displayed.
+5. Status is set to:
+   - `Accepted` when all cases pass
+   - `Time Limit Exceeded` when any result has `executionTime > 1000ms`
+   - `Runtime Error` when runtime errors occur
+   - `Wrong Answer` otherwise
+
+#### Submission surfacing and dashboard exit
+
+- Successful submissions are persisted by `src/services/submissionService.ts` and shown in `src/pages/Submissions.tsx`.
+- `src/pages/ProblemList.tsx` now reads `getSubmissionStats()` and surfaces `Submissions`, `Accepted`, and `Solved` in the Coding Challenges header so users can see coding progress from the main questions list.
+- `app/(root)/coding/page.tsx` embeds the coding platform inside an `iframe`.
+- The dashboard exit control now uses `components/CodingBackButton.tsx`, which performs `window.location.assign("/")` instead of a soft client-side route transition.
+- This hard navigation fully tears down the embedded coding app before returning to `/`, which avoids the freeze/stuck-screen behavior seen after navigating back from solved problems or the submissions view.
+
+#### Custom test case
+
+1. `Problem.tsx` calls `handleCustomTest(input)`.
+2. It creates one test case with `expectedOutput: 'Custom test case'`.
+3. It calls `evaluateCode(code, language, [testCase])`.
+4. Use this for exploratory one-off inputs.
+
+> Note: The current UI does not include a dedicated `Reset` button. If added, it would reset `code`, `results`, `feedback`, and `status` to initial values.
+
+### 3. Test case preparation: `src/utils/testCaseManager.ts`
+
+`prepareTestCases(problem)` builds the test suite from the problem definition.
+
+- Adds `sampleInputs` and `sampleOutputs` as visible cases.
+- Adds `hiddenInputs` and `hiddenOutputs` as hidden cases when present.
+- Returns `TestCase[]`.
+
+Each `TestCase` contains:
+- `input` — raw string passed into the wrapper
+- `expectedOutput` — string representation of expected return
+- `isHidden` — whether the case is hidden from normal runs
+
+### 4. Wrapping user code: `src/services/wrapperEngine.ts`
+
+To execute multiple cases in one Judge0 submission, the platform wraps user code.
+
+#### JavaScript wrapping
+
+- Detects the user function name from `function`, `const`, `let`, or `var` declarations.
+- Builds a `__testCases` array and iterates over each case.
+- Parses the input format:
+  - first line: comma-separated numbers
+  - second line: target value
+- Calls the detected function and compares actual output to expected output.
+- Logs a JSON array of test results to stdout.
+
+#### Python wrapping
+
+- Detects a `def` function, defaults to `solution`.
+- Supports object-based `Solution` classes when available.
+- Parses input, calls the function, and prints a JSON result array.
+
+#### Java wrapping
+
+- Wraps the user class inside a `Main` class with `main()`.
+- Parses string input into arrays and calls `solution.twoSum(nums, target)`.
+- Prints JSON results.
+
+#### C++ wrapping
+
+- Builds a `main()` that stores test cases in a vector of string pairs.
+- Parses each input into numeric arrays.
+- Calls `Solution().twoSum(nums, target)`.
+- Prints a JSON-like array of result objects.
+
+The wrapper is why the platform supports JavaScript, Python, Java, and C++ from one evaluation pipeline.
+
+### 5. Judge0 integration: `src/services/judge0Service.ts`
+
+This service performs Judge0 API calls via Axios.
+
+- `submitWithWait({ source_code, language_id, stdin })` → POST `/submissions?wait=true`
+- `getLanguageId(language)` → maps code language to Judge0 numeric ID
+- `makeRequest()` handles headers, RapidAPI key, and logs request details
+
+Judge0 returns a complete execution object with:
+- `stdout` — program output
+- `stderr` — runtime error output
+- `compile_output` — compilation error output
+- `time` — execution time in seconds
+- `memory` — memory used
+- `status` — status `id` and `description`
+
+### 6. Evaluation result parsing: `src/services/evaluationService.ts`
+
+`evaluateCode()` is the central brain.
+
+- Wraps code with the wrapper engine.
+- Submits a single Judge0 request for all test cases.
+- Parses the wrapper’s JSON stdout output.
+- Builds `TestResult[]` objects.
+
+Each `TestResult` contains:
+- `passed`
+- `input`
+- `expectedOutput`
+- `actualOutput`
+- `executionTime` (approximated)
+- `memoryUsed` (approximated)
+- `isHidden`
+
+
+#### Runtime calculation
+
+- Judge0 returns a single total runtime string, e.g. `0.123`
+- The code converts it to milliseconds: `parseFloat(time) * 1000`
+- It divides the total by the number of test cases:
+  - `Math.round(executionTime / parsedResults.length)`
+
+This is an estimate because the wrapper runs all cases in one process.
+
+#### Error handling
+
+- If status is `3` (Accepted), parse JSON and return per-case results.
+- If status is `6` (Compilation Error), set every case to failed with compile output.
+- If status is `7` (Runtime Error), set every case to failed with stderr.
+- If JSON parsing fails, fallback to simple string comparison.
+
+### 7. Status definitions
+
+- `Accepted` — all evaluated cases passed.
+- `Wrong Answer` — code ran but one or more cases failed.
+- `Runtime Error` — code crashed during execution.
+- `Time Limit Exceeded` — Judge0 timed out.
+- `Evaluating` — evaluation is in progress.
+
+### 8. Language-specific edge handling
+
+The platform handles differences between languages by using the wrapper engine:
+- JavaScript and Python can call functions directly and parse input strings.
+- Java must be wrapped in a `Main` class entrypoint.
+- C++ requires a `main()` function and vector parsing.
+
+The wrapper also standardizes the expected-output format across languages.
+
+### 9. How the UI fits together
+
+- `ProblemDisplay` — renders the problem statement and examples.
+- `HintSystem` — shows hints and solution text.
+- `CodeEditor` — code editing with Monaco and language switch.
+- `CustomTestCase` — accepts one custom input and runs it.
+- `TestResults` — displays results, runtime, memory, and feedback.
+
+### 10. Technologies used in `leetc/coding-platform`
+
+- `Vite` — local development server and bundler.
+- `esbuild` — used by Vite for fast rebuilds.
+- `React 18` — component-based UI.
+- `TypeScript` — static typing and editor tooling.
+- `Tailwind CSS` — utility-first styling.
+- `@monaco-editor/react` — browser code editor.
+- `Axios` — HTTP requests to Judge0.
+- `Judge0` via RapidAPI — remote code execution engine.
+
+### 10.1 Tab Proctoring & Anti-Cheating Features (Latest Update - April 2026)
+
+The platform includes production-ready tab proctoring to prevent cheating during coding interviews:
+
+#### Detection Mechanisms
+- **Visibility API**: Detects when the browser tab becomes hidden (Alt+Tab, minimize, app switch)
+- **Window Blur**: Detects when the browser window loses focus
+- **Automatic Freeze**: Triggers 3-minute editor lockdown on violation
+
+#### Freeze Implementation
+- **Monaco Editor Lock**: Sets `readOnly: true` on the editor when frozen
+- **Visual Overlay**: Full-screen modal with live countdown timer
+- **Alert Notification**: Immediate browser alert on violation detection
+- **Auto-Unfreeze**: Editor automatically unlocks after 3 minutes
+- **Persistence**: Freeze state survives page refresh using localStorage
+
+#### Hook Architecture: `src/hooks/useTabProctoring.ts`
+```typescript
+export const useTabProctoring = () => {
+  const [isFrozen, setIsFrozen] = useState(false);
+  const [timeLeft, setTimeLeft] = useState(0);
+  const [formattedTime, setFormattedTime] = useState("0:00");
+  const [violations, setViolations] = useState(0);
+  
+  // Detects tab switches and window blur
+  // Escalating penalties: 1st violation = 3 min, 2nd = 5 min, 3rd+ = 10 min
+  // Manages live countdown timer with localStorage persistence
+  // Returns: { isFrozen, timeLeft, formattedTime, violations }
+};
+```
+
+#### UI Integration
+- **Problem.tsx**: Imports hook, passes `isFrozen` to `CodeEditor`
+- **CodeEditor.tsx**: Accepts `isFrozen` prop, sets Monaco `readOnly` option
+- **Overlay**: Conditionally renders freeze modal with live `formattedTime` display (updates every second)
+
+#### Escalating Penalties
+- **1st Violation**: 3-minute freeze
+- **2nd Violation**: 5-minute freeze  
+- **3rd+ Violations**: 10-minute freeze (auto-submit could be implemented)
+
+#### Persistence Features
+- **localStorage Keys**: 
+  - `"freezeEnd"`: Timestamp when freeze ends
+  - `"violations"`: Current violation count
+- **Refresh During Freeze**: Freeze continues, timer resumes correctly
+- **Close Tab & Reopen**: Same behavior as refresh - freeze persists
+
+#### What It Detects
+✅ Alt+Tab switching  
+✅ Tab minimization  
+✅ App switching  
+✅ Window focus loss  
+✅ Click Outside Browser
+
+#### Limitations (Cannot Detect)
+❌ Refresh to escape (but freeze persists)  
+❌ Switch very fast  
+❌ Use split screen  
+❌ Use another desktop (not solvable fully)
+
+
+#### HOW FUNCTION IN CODE DETECTS THIS + INTERNAL 
+
+#### Limitations
+❌ Exact Alt+Tab keypress (requires visibility change)  
+❌ External monitoring tools  
+❌ Screenshot prevention  
+
+This creates a professional testing environment that discourages cheating while maintaining a smooth user experience.
+ Fixed Issues
+1. Live Timer Display
+Problem: Timer showed "3:00" but didn't count down live
+Solution: Added formattedTime as a useState that updates every second in the interval
+Result: Timer now shows live countdown (3:00 → 2:59 → 2:58...)
+2. Popup Auto-Disappears
+Problem: After 3 minutes, popup stayed visible and required manual refresh
+Solution: When timeLeft reaches 0, setIsFrozen(false) is called, which hides the overlay automatically
+Result: Popup disappears immediately when timer hits 0:00, allowing continued use without refresh
+3. Persistence on Refresh/Tab Close
+Added: localStorage now stores both "freezeEnd" timestamp and "violations" count
+Refresh During Freeze: Freeze continues seamlessly, timer resumes from correct remaining time
+Close Tab & Reopen: Same behavior - freeze persists across sessions
+4. Escalating Penalties
+1st Violation: 3-minute freeze
+2nd Violation: 5-minute freeze
+3rd+ Violations: 10-minute freeze (placeholder for future auto-submit)
+
+🚀 How It Works Now
+Violation Detected → Alert with penalty duration → Editor freezes
+Timer Counts Down Live → Display updates every second
+Timer Expires → Popup disappears automatically → Editor unfreezes
+Page Refresh/Tab Reopen → Freeze continues if active
+Multiple Violations → Longer penalties (3min → 5min → 10min)
+
+🔐 Strict Mode: All Edge Cases Handled
+✅ Violations don't stack
+✅ Timer doesn't reset unexpectedly
+✅ localStorage is source of truth
+✅ No memory leaks (proper interval management)
+✅ Debouncing prevents rapid re-triggers
+✅ Auto-unfreeze with no manual refresh
+✅ Persists across browser close/reopen
+✅ Survives page refresh mid-freeze
+✅ Escalating penalties (3→5→10 mins)
+✅ Live countdown updates every second
+
+
+USER ACTION              DETECTION              RESPONSE
+─────────────────────────────────────────────────────────────
+Alt+Tab         →  visibilitychange event   →  startFreeze()
+Minimize        →  visibilitychange event   →  startFreeze()
+Window Blur     →  blur event               →  startFreeze()
+Click Outside   →  blur event               →  startFreeze()
+
+DURING FREEZE:
+──────────────────────────────────────────────────────────────
+Another Alt+Tab →  visibilitychange event   →  IGNORED (already frozen)
+Refresh page    →  localStorage restored    →  Timer continues
+Close tab       →  localStorage persists    →  Timer continues after reopen
+Timer → 0:00    →  Persistent interval      →  setIsFrozen(false) AUTO
+
+
+✅ ALL 5 CONDITIONS NOW GUARANTEED TO WORK
+#	Condition	Status	What Happens
+1️⃣	Alt+tab, minimize, app switch, focus loss	✅	Timer starts 3:00 → 2:59... (escalates 3→5→10 mins)
+2️⃣	Alt+tab AGAIN during freeze              	✅	Timer stays and continues (doesn't restart)
+3️⃣	Page refresh during freeze              	✅	Timer resumes from exact remaining time
+4️⃣	Close & reopen browser                  	✅	localStorage persists - timer continues
+5️⃣	Timer ends (0:00)                        	✅	AUTO-UNFREEZE (no refresh needed)
+
+
+### 11. Example user flows
+
+#### Normal run flow
+- User writes code in the editor.
+- User clicks `Run Code`.
+- The visible sample cases are executed.
+- Results appear immediately in the `TestResults` section.
+
+#### Full submission flow
+- User clicks `Submit Solution`.
+- Hidden cases are also evaluated.
+- The status updates based on final pass/fail.
+
+#### Custom input flow
+- User enters a custom test string.
+- The platform builds a one-case JSON harness and evaluates it.
+- Useful for edge cases and debugging.
+
+### 12. What test cases represent
+
+A test case is a single input / expected output pair used to validate the code.
+- Visible cases are shared examples from the problem statement.
+- Hidden cases simulate final judge evaluation and are only used on `Submit Solution`.
+- The code wrapper executes all selected cases in one submission, then returns detailed pass/fail data.
+
+### 13. Where runtime is measured
+
+- The runtime shown in `TestResult` is derived from Judge0’s total execution time.
+- Because the wrapper runs all selected cases as a single program, the code divides the overall runtime evenly across test cases.
+- This means per-case runtime is approximate, not exact.
+
+### 14. File responsibilities at a glance
+
+- `src/pages/Problem.tsx` — main page logic, buttons, state, status.
+- `src/components/CodeEditor/CodeEditor.tsx` — editor, language switching, code changes.
+- `src/components/CustomTestCase/CustomTestCase.tsx` — custom input form.
+- `src/components/TestResults/TestResults.tsx` — UI for results and feedback.
+- `src/components/ProblemDisplay/ProblemDisplay.tsx` — problem content.
+- `src/components/HintSystem/HintSystem.tsx` — hints and help.
+- `src/hooks/useTabProctoring.ts` — tab switch detection, editor freeze logic.
+- `src/utils/testCaseManager.ts` — builds test case arrays.
+- `src/services/wrapperEngine.ts` — language-specific execution wrappers.
+- `src/services/judge0Service.ts` — Judge0 API communication.
+- `src/services/evaluationService.ts` — orchestration, parsing, feedback.
+- `src/data/languages.ts` — language metadata and Judge0 ID mapping.
+
+This section should now explain exactly how the Leetc UI works from click to execution, including language handling, runtime semantics, and button behaviors.
+
+---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ## 🔐 Authentication Flow
 
@@ -4012,8 +5734,8 @@ Webcam Activation
 
 **Components Involved**:
 - `useWebcam()` hook: Camera access + video stream
-- `useMediaPipe()` hook: Face landmark model loading
-- `usePostureDetection()` hook: Pose estimation model
+- `useMediaPipe()` hook: Face landmark model loading + active posture analysis path
+- `usePostureDetection()` hook: Legacy/alternate pose estimation hook
 - `useAnalysisLoop()` hook: Coordinated analysis scheduling
 
 #### 2 Real-time Analysis Loop (`hooks/useAnalysisLoop.ts`)
@@ -4124,6 +5846,11 @@ Confidence Score: XX/100
 - **Face Landmarker**: `@mediapipe/tasks-vision` (face landmarks, blendshapes)
 - **Pose Landmarker**: `@mediapipe/tasks-vision` (body posture detection)
 
+#### Pose Result Shape Note
+- In the current `@mediapipe/tasks-vision` setup used by this repo, `PoseLandmarker.detectForVideo()` is consumed from `result.landmarks`.
+- The posture hooks now support both `result.landmarks` and `result.poseLandmarks` as a compatibility fallback.
+- This change is important because reading only `poseLandmarks` caused posture detection to appear inactive even while the pose model was loaded correctly.
+
 #### Browser APIs Required
 - `navigator.mediaDevices.getUserMedia()` - Camera access
 - `requestAnimationFrame()` - Analysis scheduling
@@ -4168,5 +5895,4 @@ UI Display
 - **Analysis Errors**: Continues with available metrics
 
 This implementation provides rich non-verbal feedback while maintaining user privacy and system performance.
-
 

@@ -9,6 +9,7 @@ import { useAnalysisLoop } from "@/hooks/useAnalysisLoop";
 import { cn } from "@/lib/utils";
 import { vapi } from "@/lib/vapi.sdk";
 import { createFeedback } from "@/lib/actions/general.action";
+import { saveInterviewAttempt, normalizeInterviewId } from "@/utils/db";
 import type { AgentProps, SavedMessage } from "@/types";
 import { interviewer } from "@/constants";
 import { VideoPreview } from "@/components/interview/VideoPreview";
@@ -29,15 +30,23 @@ const Agent = ({
   type,
   questions,
   language = "en",
+  role,
 }: AgentProps) => {
   const router = useRouter();
   const [callStatus, setCallStatus] = useState<CallStatus>(CallStatus.INACTIVE);
   const [messages, setMessages] = useState<SavedMessage[]>([]);
   const [isSpeaking, setIsSpeaking] = useState(false);
-  type InterviewStage = "greeting" | "waitingGreetingReply" | "startInterview" | "question1" | "question2" | "question3" | "completed";
-const [interviewStage, setInterviewStage] = useState<InterviewStage>("greeting");
+  type InterviewStage =
+    | "greeting"
+    | "waitingGreetingReply"
+    | "startInterview"
+    | "question1"
+    | "question2"
+    | "question3"
+    | "completed";
+  const [, setInterviewStage] = useState<InterviewStage>("greeting");
   const [isProcessing, setIsProcessing] = useState(false);
-  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+  const [, setCurrentQuestionIndex] = useState(0);
 
   const stopRef = useRef(false);
   const feedbackGeneratedRef = useRef(false);
@@ -77,8 +86,19 @@ const [interviewStage, setInterviewStage] = useState<InterviewStage>("greeting")
       setCallStatus(CallStatus.FINISHED);
     };
 
-    // ✅ FIXED: typed message as any to avoid TS errors on dynamic Vapi payload
-    const onMessage = (message: any) => {
+    type VapiIncomingMessage = {
+      type?: string;
+      transcriptType?: string;
+      role?: string;
+      transcript?: string;
+      text?: string;
+      message?: {
+        role?: string;
+        content?: string;
+      };
+    };
+
+    const onMessage = (message: VapiIncomingMessage) => {
       console.log("📩 RAW MESSAGE RECEIVED:", message);
 
       if (message.type === "transcript" && message.transcriptType === "final") {
@@ -138,8 +158,11 @@ const [interviewStage, setInterviewStage] = useState<InterviewStage>("greeting")
       setIsSpeaking(false);
     };
 
-    const onError = (error: any) => {
-      console.log("🚨 VAPI ERROR:", JSON.stringify(error, null, 2));
+    const onError = (error: unknown) => {
+      console.log(
+        "🚨 VAPI ERROR:",
+        typeof error === "object" && error !== null ? JSON.stringify(error, null, 2) : String(error)
+      );
     };
 
     // ✅ FIXED: removed unused onTranscript/onSpeechUpdate/onConversationUpdate
@@ -177,7 +200,7 @@ const [interviewStage, setInterviewStage] = useState<InterviewStage>("greeting")
       console.log("📊 Video summary:", videoSummary);
 
       try {
-        const { success, feedbackId: id, error } = await createFeedback({
+        const { success, feedbackId: id, feedback, error } = await createFeedback({
           interviewId: interviewId!,
           userId: userId!,
           transcript: messages,
@@ -186,6 +209,49 @@ const [interviewStage, setInterviewStage] = useState<InterviewStage>("greeting")
         });
 
         if (success && id) {
+          if (feedback) {
+            try {
+              console.log("🚀 FEEDBACK RECEIVED:", feedback);
+
+              const normalizeName = (name: string) =>
+                name.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+              const getScore = (name: string) =>
+                feedback.categoryScores.find(
+                  (category) =>
+                    normalizeName(category.name) === normalizeName(name)
+                )?.score ?? 0;
+
+              const attempt = {
+                attemptId: crypto.randomUUID(),
+                interviewId: normalizeInterviewId(role, language || "en"),
+                userId: userId!,
+                role,
+                language: (language || "en") as "en" | "hi",
+                createdAt: new Date().toISOString(),
+                scores: {
+                  overallImpression: feedback.totalScore,
+                  confidenceClarity: getScore("Confidence&Clarity"),
+                  technicalKnowledge: getScore("TechnicalKnowledge"),
+                  roleFit: getScore("RoleFit"),
+                  culturalFit: getScore("CulturalFit"),
+                  communication: getScore("CommunicationSkills"),
+                  problemSolving: getScore("Problem-Solving"),
+                },
+              };
+
+              console.log("📝 INTERVIEW ATTEMPT READY TO SAVE:", attempt);
+              await saveInterviewAttempt(attempt);
+              console.log("✅ LOCAL ANALYTICS SAVE COMPLETE:", {
+                attemptId: attempt.attemptId,
+                interviewId: attempt.interviewId,
+                userId: attempt.userId,
+              });
+            } catch (saveError) {
+              console.warn("⚠️ Local analytics save failed:", saveError);
+            }
+          }
+
           router.push(`/interview/${interviewId}/feedback`);
         } else {
           console.error("Error saving feedback:", error);
@@ -212,7 +278,7 @@ const [interviewStage, setInterviewStage] = useState<InterviewStage>("greeting")
     return () => {
       if (timer) clearTimeout(timer);
     };
-  }, [messages, callStatus, feedbackId, interviewId, router, type, userId, getMetricsSummary]);
+  }, [messages, callStatus, feedbackId, interviewId, router, type, userId, getMetricsSummary, language, role]);
 
   const handleCall = async () => {
     console.log("📱 Call button clicked, language:", language, "type:", type);
@@ -369,7 +435,10 @@ const [interviewStage, setInterviewStage] = useState<InterviewStage>("greeting")
       const mediaRecorder = new MediaRecorder(stream);
       const chunks: BlobPart[] = [];
 
-      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const audioContext = new (
+        window.AudioContext ||
+        (window as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+      )();
       const source = audioContext.createMediaStreamSource(stream);
       const analyser = audioContext.createAnalyser();
       analyser.fftSize = 512;
@@ -426,8 +495,8 @@ const [interviewStage, setInterviewStage] = useState<InterviewStage>("greeting")
           resolve(transcript);
         };
       });
-    } catch (err) {
-      console.error("❌ STT error:", err);
+    } catch (error) {
+      console.error("❌ STT error:", error);
       stream?.getTracks().forEach((t) => t.stop());
       return null;
     }
@@ -450,7 +519,7 @@ const [interviewStage, setInterviewStage] = useState<InterviewStage>("greeting")
 
     const question = questions[index];
     setCurrentQuestionIndex(index);
-    setInterviewStage(`question${index + 1}` as any);
+    setInterviewStage(`question${index + 1}` as InterviewStage);
 
     await speakHindi(question);
 
